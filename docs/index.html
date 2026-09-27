@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#C8313F">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="On Air">
+<title>On Air English</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700&family=Manrope:wght@400;500;700&family=JetBrains+Mono:wght@500&display=swap">
+<style>
+:root{
+  --bg:#EDF0F3;--surface:#FFFFFF;--surface-2:#F4F6F8;--ink:#141B24;--muted:#5A6572;--line:#D5DBE1;
+  --accent:#C8313F;--accent-ink:#FFFFFF;--accent-soft:#F7DDE0;
+  --ok:#0F766C;--ok-soft:#D5EEEA;--warn:#9A5B00;--warn-soft:#F6E7CC;
+  --display:"Unbounded","Arial Black",system-ui,sans-serif;
+  --body:"Manrope",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    color-scheme:dark;
+    --bg:#0E1319;--surface:#161D25;--surface-2:#1C2530;--ink:#E4E9EE;--muted:#94A0AD;--line:#2A3541;
+    --accent:#FF5B6C;--accent-ink:#1B090C;--accent-soft:#3A1C23;
+    --ok:#46C2B3;--ok-soft:#12302D;--warn:#E3A548;--warn-soft:#33270F;
+  }
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 var(--body);-webkit-font-smoothing:antialiased;padding:env(safe-area-inset-top,0) 0 env(safe-area-inset-bottom,0)}
+.wrap{max-width:720px;margin:0 auto;padding-inline:16px;padding-block:14px 40px;display:flex;flex-direction:column;gap:16px}
+.stack{display:flex;flex-direction:column;gap:16px}
+h1,h2,h3{font-family:var(--display);font-weight:700;margin:0;line-height:1.2;text-wrap:balance}
+h2{font-size:22px}h3{font-size:15px}
+p{margin:0}
+a{color:var(--accent)}
+button,select,input,textarea{font:inherit;color:inherit}
+button{cursor:pointer;-webkit-tap-highlight-color:transparent}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.label{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:700}
+.note{font-size:14px;color:var(--muted)}
+.err{color:var(--accent)}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.row.small{font-size:14px;gap:6px}
+.btn{border:1px solid var(--line);background:var(--surface-2);border-radius:999px;padding:9px 16px;font-weight:700;font-size:14px;display:inline-flex;align-items:center;gap:6px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.big{padding:13px 22px;font-size:16px}
+.btn:disabled{opacity:.5}
+select,input[type=password],input[type=text]{border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:10px 12px;font-size:16px;max-width:100%;width:100%}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px;display:grid;gap:12px}
+.card.err{border-color:var(--accent);color:var(--ink)}
+.card.warn{border-color:var(--warn);background:var(--warn-soft)}
+.sec{display:grid;gap:8px}
+.sec ul,.card ul{margin:0;padding-left:18px;display:grid;gap:6px}
+.field{display:grid;gap:4px;font-size:14px;font-weight:700}
+.field select,.field input{font-weight:400}
+
+.top{display:flex;align-items:center;gap:12px}
+.lamp{font-family:var(--display);font-weight:700;font-size:12px;letter-spacing:.14em;padding:5px 9px;border:2px solid var(--line);border-radius:6px;color:var(--muted);transition:all .25s}
+.lamp.live{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);box-shadow:0 0 0 4px var(--accent-soft),0 0 24px var(--accent)}
+.top h1{font-size:20px}
+.linkish{border:none;background:none;padding:0;text-align:left;color:inherit}
+
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.stat{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px;display:grid;gap:2px}
+.stat b{font:500 22px var(--mono);font-variant-numeric:tabular-nums}
+.stat span{font-size:12px;color:var(--muted);line-height:1.2}
+@media (max-width:460px){.stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.card.next{border-left:4px solid var(--accent)}
+.focus{background:var(--ok-soft);border-radius:10px;padding:10px 12px;font-size:15px}
+.phr{display:grid;gap:6px}
+.phr div{display:grid}
+.phr span{font-size:14px;color:var(--muted)}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}
+.spark{width:100%;height:56px;display:block}
+.spark .sv{font:500 12px var(--mono);fill:var(--muted)}
+.bank,.sounds{list-style:none;padding:0!important}
+.bank li{display:flex;gap:10px;align-items:flex-start;font-size:15px}
+.bank s{color:var(--muted)}
+.sounds li{display:grid;grid-template-columns:56px 1fr;gap:10px;align-items:start;font-size:14px}
+.sounds small{display:block;color:var(--muted)}
+.ipa{font:500 18px var(--mono);color:var(--accent)}
+.pill{font:500 11px var(--mono);border-radius:999px;padding:2px 8px;border:1px solid var(--accent);color:var(--accent);white-space:nowrap;flex:none;margin-top:2px}
+.pill.fixed{border-color:var(--ok);color:var(--ok)}
+.chips{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none}
+.chips.multi{flex-wrap:wrap}
+.chip{font-size:13px;padding:5px 11px;border-radius:999px;background:var(--surface-2);border:1px solid var(--line);white-space:nowrap}
+.chip.used{border-color:var(--ok)}
+.chip.own{background:var(--ok-soft);border-color:var(--ok);color:var(--ok)}
+.bw{display:inline-block;margin:0 4px 4px 0;padding:1px 8px;border-radius:6px;background:var(--accent-soft);font-weight:700}
+.hist{list-style:none;padding:0!important}
+.hist button{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;width:100%;padding:8px 0;border-bottom:1px solid var(--line)}
+.hn{font:500 13px var(--mono);color:var(--muted)}
+.ht{display:grid}
+.ht small{color:var(--muted);font-size:12px}
+.hs{font:500 14px var(--mono)}
+details.settings{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:12px 16px}
+details.settings summary{cursor:pointer;font-weight:700}
+#settingsBody{display:grid;gap:12px;margin-top:12px}
+
+/* lesson */
+#lesson{min-height:calc(100vh - 80px);min-height:calc(100dvh - 80px)}
+.stagebar{display:grid;gap:6px}
+#stages{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}
+.seg{height:5px;border-radius:3px;background:var(--line)}
+.seg.fin{background:var(--ok)}
+.seg.cur{background:var(--accent)}
+.stagemeta{display:flex;justify-content:space-between;align-items:center;gap:10px}
+#stageName{font-weight:700}
+#stageTime{font:500 14px var(--mono);color:var(--muted);font-variant-numeric:tabular-nums}
+.ai{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:16px;display:grid;gap:10px;min-height:120px;align-content:start}
+#aiText{font-size:clamp(18px,4.6vw,22px);line-height:1.4}
+#aiRu{font-size:15px;color:var(--muted);border-top:1px dashed var(--line);padding-top:8px}
+.tools{display:flex;gap:6px;flex-wrap:wrap}
+.tool{border:1px solid var(--line);background:var(--surface-2);border-radius:999px;padding:6px 12px;font-size:13px;font-weight:700}
+.tool:disabled{opacity:.45}
+#hint{background:var(--warn-soft);border-radius:10px;padding:8px 12px;font-size:15px}
+.center{display:grid;justify-items:center;gap:10px;padding-block:6px}
+#micBtn{width:128px;height:128px;border-radius:50%;border:none;display:grid;place-items:center;background:var(--surface-2);box-shadow:inset 0 0 0 2px var(--line);transition:transform .15s}
+#micBtn svg{width:46px;height:46px;fill:var(--ink)}
+#micBtn:active{transform:scale(.96)}
+#micBtn[data-state="listening"]{background:var(--accent);box-shadow:0 0 0 10px var(--accent-soft);animation:pulse 1.4s ease-in-out infinite}
+#micBtn[data-state="listening"] svg,#micBtn[data-state="confirm"] svg{fill:var(--accent-ink)}
+#micBtn[data-state="confirm"]{background:var(--ok)}
+#micBtn[data-state="thinking"]{opacity:.55}
+#micBtn[data-state="speaking"]{box-shadow:inset 0 0 0 3px var(--accent)}
+@keyframes pulse{50%{box-shadow:0 0 0 18px var(--accent-soft)}}
+#state{font-size:14px;color:var(--muted);text-align:center;min-height:21px}
+#draft{font-size:17px;text-align:center;max-width:34ch;min-height:26px}
+#lastPron{display:grid;gap:4px;font-size:14px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+.lfoot{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+#typeForm{display:flex;gap:8px}
+#typeForm input{flex:1;min-width:0}
+
+/* report */
+.scores{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+.score{display:grid;gap:4px;font-size:13px}
+.track{display:grid;grid-template-columns:repeat(5,1fr);gap:3px}
+.track i{height:6px;border-radius:2px;background:var(--line)}
+.track i.on{background:var(--ok)}
+.mist{list-style:none;padding:0!important;display:grid;gap:10px}
+.mist li{display:grid;gap:2px;padding:10px 12px;border-radius:10px;background:var(--surface);border:1px solid var(--line)}
+.mist s,.mist small{color:var(--muted)}
+
+/* drill */
+.drill{list-style:none;padding:0;margin:0;display:grid;gap:10px}
+.drill li{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px;display:grid;gap:8px}
+.tool.rec{color:var(--accent)}
+.tool.rec.on{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.sc{font:500 14px var(--mono);margin-left:auto}
+.dtext{font-size:19px;line-height:1.5}
+.w.good{color:var(--ok)}
+.w.mid{color:var(--warn)}
+.w.bad{color:var(--accent);text-decoration:underline wavy;text-underline-offset:4px}
+.phon{display:grid;gap:6px;font-size:14px}
+.phon small{display:block;color:var(--muted)}
+
+.steps{margin:0;padding-left:20px;display:grid;gap:6px}
+#micOut{background:var(--surface-2);border-radius:10px;padding:10px 12px}
+#toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:12px;font-size:14px;max-width:calc(100% - 32px);z-index:10;box-shadow:0 6px 20px rgba(0,0,0,.25)}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="lamp" id="lamp" aria-hidden="true">ON AIR</div>
+    <button class="linkish" id="homeLink"><h1>On Air English</h1></button>
+  </header>
+
+  <section id="setup" class="card" hidden>
+    <h2>Ключи</h2>
+    <p>Ключи хранятся только на этом устройстве и отправляются только в Anthropic и Microsoft.</p>
+    <div class="sec">
+      <h3>1. Claude — ведёт урок и делает разбор</h3>
+      <ol class="steps">
+        <li><a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com → API keys</a> → Create key.</li>
+        <li>В Billing пополните баланс (хватит $5 для старта).</li>
+      </ol>
+      <label class="field" for="keyInput">Ключ Claude
+        <input type="password" id="keyInput" autocomplete="off" placeholder="sk-ant-...">
+      </label>
+    </div>
+    <div class="sec">
+      <h3>2. Azure Speech — слушает и оценивает произношение</h3>
+      <ol class="steps">
+        <li><a href="https://portal.azure.com/#create/Microsoft.CognitiveServicesSpeechServices" target="_blank" rel="noopener">portal.azure.com → создать ресурс Speech</a>, тариф Free F0.</li>
+        <li>Откройте ресурс → «Keys and Endpoint»: скопируйте KEY 1 и Location/Region.</li>
+      </ol>
+      <label class="field" for="azKey">Ключ Azure (KEY 1)
+        <input type="password" id="azKey" autocomplete="off" placeholder="32 символа">
+      </label>
+      <label class="field" for="azRegion">Регион
+        <input type="text" id="azRegion" autocomplete="off" list="regions" placeholder="например, westeurope">
+      </label>
+      <datalist id="regions"><option value="westeurope"><option value="northeurope"><option value="eastus"><option value="westus2"><option value="uksouth"><option value="swedencentral"><option value="germanywestcentral"><option value="francecentral"></datalist>
+      <p class="note" id="noSDK" hidden>Библиотека Azure не загрузилась. Обновите страницу.</p>
+    </div>
+    <div class="row">
+      <button class="btn primary" id="saveKey">Сохранить</button>
+      <button class="btn" id="micTest">Проверить микрофон</button>
+      <button class="btn" onclick="document.getElementById('homeLink').click()">На главную</button>
+    </div>
+    <p id="micOut" hidden></p>
+  </section>
+
+  <section id="home" class="stack" hidden>
+    <div class="stack" id="homeBody"></div>
+    <details class="settings">
+      <summary>Настройки</summary>
+      <div id="settingsBody"></div>
+    </details>
+  </section>
+
+  <section id="lesson" class="stack" hidden>
+    <div class="stagebar">
+      <div id="stages"></div>
+      <div class="stagemeta"><span id="stageName"></span><span id="stageTime"></span></div>
+    </div>
+    <div class="ai" aria-live="polite">
+      <p id="aiText"></p>
+      <p id="aiRu" hidden></p>
+      <div class="tools">
+        <button class="tool" id="repeatBtn">↻ Повтори</button>
+        <button class="tool" id="slowBtn">Медленнее</button>
+        <button class="tool" id="ruBtn">RU перевод</button>
+        <button class="tool" id="hintBtn">Не знаю, что сказать</button>
+      </div>
+      <p id="hint" hidden></p>
+    </div>
+    <div class="center">
+      <button id="micBtn" aria-label="Говорить"><svg viewBox="0 0 16 16"><path d="M8 10a2.5 2.5 0 0 0 2.5-2.5v-4a2.5 2.5 0 0 0-5 0v4A2.5 2.5 0 0 0 8 10zm4-2.5h1A5 5 0 0 1 8.5 12.5V15h-1v-2.5A5 5 0 0 1 3 7.5h1a4 4 0 0 0 8 0z"/></svg></button>
+      <p id="state"></p>
+      <p id="draft" hidden></p>
+      <button class="btn" id="doneBtn" hidden>Готово, отправить</button>
+    </div>
+    <div id="lastPron" hidden></div>
+    <div>
+      <span class="label">Фразы урока · нажмите, чтобы послушать</span>
+      <div class="chips" id="chips"></div>
+    </div>
+    <form id="typeForm" autocomplete="off">
+      <input type="text" id="typeInput" placeholder="Или напишите ответ" aria-label="Ответ текстом">
+      <button class="btn">Отправить</button>
+    </form>
+    <div class="lfoot">
+      <button class="btn" id="skipBtn">Следующий этап →</button>
+      <button class="btn" id="endBtn">Закончить</button>
+    </div>
+  </section>
+
+  <section id="report" class="stack" hidden><div class="stack" id="reportBody"></div></section>
+  <section id="drill" class="stack" hidden><div class="stack" id="drillBody"></div></section>
+</div>
+<div id="toast" role="status" hidden></div>
+<script src="vendor/speech-sdk.min.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
