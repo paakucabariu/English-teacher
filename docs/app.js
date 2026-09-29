@@ -57,7 +57,15 @@ async function keepAwake(on) {
     if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
   } catch { wakeLock = null; }
 }
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && L && !L.finished) keepAwake(true); });
+document.addEventListener("visibilitychange", () => {
+  if (!L || L.finished) return;
+  if (document.visibilityState === "visible") { keepAwake(true); return; }
+  // the app went to the background: iOS takes the microphone away, so stop cleanly and keep the lesson
+  if (input.active) { stopInput(); L.state = "idle"; L.error = "Запись остановилась, пока приложение было свёрнуто. Нажмите на микрофон и повторите ответ."; }
+  if (tts.speaking) { stopSpeaking(); if (L.state === "speaking") L.state = "idle"; }
+  saveProgress(); lessonUI();
+});
+window.addEventListener("pagehide", () => { if (L && !L.finished) saveProgress(); });
 
 /* ================= speech output ================= */
 const canSpeak = "speechSynthesis" in window;
@@ -89,28 +97,39 @@ function setLive() { $("#lamp").classList.toggle("live", tts.speaking || input.a
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 // Android Chrome repeats results in continuous mode, so there each phrase is its own recognition session.
 const CONTINUOUS = !/Android/i.test(navigator.userAgent);
-const input = { active: false, started: false, rec: null, base: "", fin: "", interim: "", lastChange: 0, firstAt: 0, timer: null, watchdog: null, opts: {} };
-let micBlocked = !SR;
+const input = { active: false, started: false, rec: null, base: "", fin: "", interim: "", lastChange: 0, firstAt: 0, timer: null, watchdog: null, opts: {}, restarts: 0 };
+// Only a browser without speech recognition is "blocked". Microphone errors are never permanent:
+// iOS reports not-allowed / audio-capture transiently (e.g. when it cuts a session short), and the next tap usually works.
+const micBlocked = !SR;
 const canListen = () => !micBlocked;
+let micFailures = 0;
 function inputText() { return [input.base, input.fin, input.interim].join(" ").replace(/\s+/g, " ").trim(); }
-function blockMic(msg) {
+/* The recording stopped by itself. Keep what was said instead of losing it. */
+function interrupted(msg) {
+  if (!input.active) return;
+  if (inputText()) { finishInput(); return; }
+  micFailures++;
   const fail = input.opts.onFail;
-  micBlocked = true; stopInput(); toast(msg);
-  fail && fail(msg);
+  stopInput();
+  fail && fail(micFailures >= 3
+    ? msg + " Если повторяется: Настройки iPhone → Safari → Микрофон → «Разрешить», затем закройте и откройте приложение."
+    : msg);
 }
 /* opts: onUpdate(text), onDone(text, ms), onStart() once the microphone is really on, onFail(msg), auto: send after a pause */
 function startInput(opts) {
   if (micBlocked) return false;
   stopInput();
-  Object.assign(input, { active: true, started: false, base: "", fin: "", interim: "", lastChange: Date.now(), firstAt: 0, opts });
+  if (canSpeak && (tts.speaking || speechSynthesis.speaking)) stopSpeaking(); // iOS cannot record while it is speaking
+  Object.assign(input, { active: true, started: false, base: "", fin: "", interim: "", lastChange: Date.now(), firstAt: 0, opts, restarts: 0 });
   const run = () => {
     if (!input.active) return;
     let rec;
-    try { rec = new SR(); } catch { blockMic("Распознавание речи недоступно в этом браузере."); return; }
+    try { rec = new SR(); } catch { interrupted("Распознавание речи не запустилось. Нажмите на микрофон ещё раз."); return; }
     rec.lang = "en-US"; rec.continuous = CONTINUOUS; rec.interimResults = true; rec.maxAlternatives = 1;
-    const started = () => { if (!input.started && input.active) { input.started = true; clearTimeout(input.watchdog); input.opts.onStart && input.opts.onStart(); } };
+    const started = () => { if (!input.started && input.active) { input.started = true; micFailures = 0; clearTimeout(input.watchdog); input.opts.onStart && input.opts.onStart(); } };
     rec.onstart = started; rec.onaudiostart = started;
     rec.onresult = ev => {
+      if (rec !== input.rec) return;
       let fin = "", inter = "";
       for (let i = 0; i < ev.results.length; i++) { const r = ev.results[i]; if (r.isFinal) fin += r[0].transcript + " "; else inter += r[0].transcript; }
       input.fin = fin.trim(); input.interim = inter;
@@ -118,21 +137,31 @@ function startInput(opts) {
       input.lastChange = Date.now(); input.opts.onUpdate && input.opts.onUpdate(inputText());
     };
     rec.onerror = ev => {
-      if (["not-allowed", "service-not-allowed", "audio-capture"].includes(ev.error))
-        blockMic("Нет доступа к микрофону. Разрешите его: Настройки → Safari → Микрофон, затем перезагрузите страницу.");
+      if (rec !== input.rec) return;
+      if (ev.error === "not-allowed" || ev.error === "service-not-allowed")
+        interrupted(input.restarts ? "Запись прервалась." : "Нет доступа к микрофону. Нажмите на микрофон ещё раз и, если телефон спросит, разрешите доступ.");
+      else if (ev.error === "audio-capture")
+        interrupted("Микрофон занят (звонок или другое приложение). Нажмите на микрофон ещё раз.");
+      // no-speech, aborted, network: the session ends and onend decides what to do
     };
     rec.onend = () => {
+      if (rec !== input.rec) return;
       input.base = [input.base, input.fin].join(" ").trim(); input.fin = ""; input.interim = "";
-      if (input.active) setTimeout(run, 60);
+      if (!input.active) return;
+      // the browser ended the session on its own (a pause, a time limit): start a new one, at most a few times
+      if (input.restarts >= 5) { interrupted("Запись остановилась. Нажмите на микрофон ещё раз."); return; }
+      input.restarts++;
+      setTimeout(run, 80);
     };
-    try { rec.start(); input.rec = rec; }
-    catch { const fail = input.opts.onFail; stopInput(); fail && fail("Микрофон не включился. Нажмите ещё раз."); }
+    input.rec = rec;
+    try { rec.start(); }
+    catch { interrupted("Микрофон не включился. Нажмите на него ещё раз."); }
   };
   run();
   if (!input.active) return false;
   // if the browser never reports that recording started, say so instead of pretending to listen
   clearTimeout(input.watchdog);
-  input.watchdog = setTimeout(() => { if (input.active && !input.started) { const fail = input.opts.onFail; stopInput(); fail && fail("Микрофон не включился. Нажмите на кнопку ещё раз."); } }, 3000);
+  input.watchdog = setTimeout(() => { if (input.active && !input.started) interrupted("Микрофон не включился. Нажмите на кнопку ещё раз."); }, 3000);
   clearInterval(input.timer);
   input.timer = setInterval(() => { if (input.active && input.opts.auto && inputText() && Date.now() - input.lastChange > db.settings.silence) finishInput(); }, 200);
   setLive();
@@ -145,8 +174,9 @@ function finishInput() {
 }
 function stopInput() {
   input.active = false; clearInterval(input.timer); clearTimeout(input.watchdog);
-  try { input.rec && input.rec.abort(); } catch {}
-  input.rec = null; setLive();
+  const rec = input.rec; input.rec = null;
+  try { rec && rec.abort(); } catch {}
+  setLive();
 }
 
 /* Words the recognizer fails to catch when the learner reads a known phrase: a rough signal of unclear pronunciation. */
@@ -252,8 +282,46 @@ function beginLesson() {
   if (canSpeak) { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; speechSynthesis.speak(u); }
   keepAwake(true);
   L.stageStart = L.startedAt = Date.now();
-  L.tick = setInterval(() => { if (L && !L.finished) { stageBar(); if (L.state === "listening") statusUI(); } }, 1000);
+  startTick();
   aiTurn();
+}
+function startTick() {
+  clearInterval(L.tick);
+  L.tick = setInterval(() => { if (L && !L.finished) { stageBar(); if (L.state === "listening") statusUI(); } }, 1000);
+}
+
+/* ---- the lesson in progress is saved after every exchange, so closing the app loses nothing ---- */
+function saveProgress() {
+  if (!L || L.finished || L.state === "intro") return;
+  const now = Date.now();
+  store.set("current", {
+    v: 1, savedAt: new Date().toISOString(), plan: L.plan, stage: L.stage,
+    stageElapsed: Math.round((now - L.stageStart) / 1000), totalElapsed: Math.round((now - L.startedAt) / 1000),
+    messages: L.messages, notes: L.notes, transcript: L.transcript, turns: L.turns, stageDone: L.stageDone,
+    speakMs: L.speakMs, words: L.words, answers: L.answers, longest: L.longest, last: L.last
+  });
+}
+function savedLesson() {
+  const c = store.get("current", null);
+  return c && c.v === 1 && c.plan && Array.isArray(c.messages) ? c : null;
+}
+function discardProgress() { try { localStorage.removeItem(K + "current"); } catch {} }
+function resumeLesson(thenFinish) {
+  const c = savedLesson(); if (!c || !client) return;
+  if (canSpeak) { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; speechSynthesis.speak(u); }
+  const now = Date.now();
+  L = { plan: c.plan, stage: c.stage, stageStart: now - c.stageElapsed * 1000, startedAt: now - c.totalElapsed * 1000,
+        messages: c.messages, notes: c.notes || [], transcript: c.transcript || [], turns: c.turns || 0, justStarted: false, stageDone: !!c.stageDone,
+        ending: false, finished: false, speakMs: c.speakMs || 0, words: c.words || 0, answers: c.answers || 0, longest: c.longest || 0,
+        state: "idle", last: c.last || { text: "", ru: "", hint: "" }, showRu: false, showHint: false,
+        draft: "", recStart: 0, ctl: null, confirmEnd: 0, tick: null, error: "" };
+  if (thenFinish) { finishLesson(); return; }
+  keepAwake(true);
+  show("lesson"); startTick();
+  // the last answer was sent but the reply never arrived: ask again
+  if (L.messages.at(-1) && L.messages.at(-1).role === "user") { lessonUI(); aiTurn(); return; }
+  L.error = "Урок продолжается с того же места. Нажмите на микрофон и ответьте на последний вопрос Алекса.";
+  lessonUI();
 }
 function maybeAdvance() {
   const st = STAGES[L.stage], elapsed = (Date.now() - L.stageStart) / 1000;
@@ -270,6 +338,7 @@ function userSays(text, ms) {
   L.messages.push({ role: "user", content: text });
   L.turns++;
   maybeAdvance();
+  saveProgress();
   aiTurn();
 }
 async function aiTurn() {
@@ -310,6 +379,7 @@ async function aiTurn() {
     if (meta.done === true) L.stageDone = true;
     L.messages.push({ role: "assistant", content: spoken || "Sorry, could you say that again?" });
     L.transcript.push({ who: "ai", text: spoken });
+    saveProgress();
     L.state = "speaking"; lessonUI();
     whenSpoken(() => {
       if (!L || L.finished) return;
@@ -357,6 +427,8 @@ async function finishLesson() {
   if (!L || L.finished) return;
   L.finished = true; clearInterval(L.tick);
   stopInput(); stopSpeaking(); if (L.ctl) L.ctl.abort(); keepAwake(false);
+  discardProgress();
+  if (!L.answers) { L = null; toast("Урок закрыт: вы ещё ничего не ответили, сохранять нечего."); homeUI(); return; }
   const s = {
     id: Date.now().toString(36), date: new Date().toISOString(), n: L.plan.n, topic: L.plan.topic, title: L.plan.title, model: db.settings.model,
     durationSec: Math.round((Date.now() - L.startedAt) / 1000), speakSec: Math.round(L.speakMs / 1000),
@@ -618,6 +690,7 @@ function homeUI() {
   const sel = el("select", { id: "topicSel", "aria-label": "Тема урока" }, TOPICS.map((t, i) => el("option", { value: i, selected: i === plan.topic }, t.ru)));
   const errs = db.profile.errors.slice().sort((a, b) => (a.status === "fixed") - (b.status === "fixed") || b.count - a.count).slice(0, 8);
   const unclear = unclearWords();
+  const cur = savedLesson();
   fill($("#homeBody"),
     el("section", { class: "stats" },
       stat(ss.length, "уроков"), stat(Math.round(ss.reduce((a, s) => a + s.speakSec, 0) / 60), "минут речи"),
@@ -625,14 +698,24 @@ function homeUI() {
     micBlocked ? el("section", { class: "card warn" }, el("p", {}, SR
       ? "Нет доступа к микрофону. Разрешите его: Настройки → Safari → Микрофон, затем перезагрузите страницу."
       : "Этот браузер не распознаёт речь. На iPhone откройте страницу в Safari, на компьютере — в Chrome.")) : null,
+    cur ? el("section", { class: "card resume" },
+      el("span", { class: "label" }, "Незаконченный урок"),
+      el("h2", {}, `Урок ${cur.plan.n}: ${cur.plan.title}`),
+      el("p", { class: "note" }, `Этап ${cur.stage + 1} из 5 · ${STAGES[cur.stage].name} · ответов: ${cur.answers} · сохранено ${new Date(cur.savedAt).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}`),
+      el("div", { class: "row" },
+        el("button", { class: "btn primary big", onclick: () => resumeLesson(false) }, "▶ Продолжить урок"),
+        cur.answers >= 3 ? el("button", { class: "btn", onclick: () => resumeLesson(true) }, "Закончить и получить разбор") : null)) : null,
     el("section", { class: "card next" },
-      el("span", { class: "label" }, `Урок ${plan.n}`),
+      el("span", { class: "label" }, cur ? `Или новый урок ${plan.n}` : `Урок ${plan.n}`),
       el("h2", {}, plan.title),
       plan.focus ? el("p", { class: "focus" }, plan.focus) : el("p", { class: "note" }, "20 минут голосом: разминка, фразы урока, разговор, ролевая ситуация, работа над ошибками. В конце разбор."),
       el("div", { class: "phr" }, plan.phrases.map(([en, ru]) => el("div", {}, el("b", {}, en), el("span", {}, ru)))),
       plan.drill.length ? el("p", { class: "note" }, "Будем отрабатывать: " + plan.drill.join("; ")) : null,
       el("div", { class: "row" },
-        el("button", { class: "btn primary big", onclick: () => startLesson(+sel.value) }, "▶ Начать урок"),
+        el("button", { class: cur ? "btn" : "btn primary big", onclick: e => {
+          if (cur && !e.currentTarget.dataset.sure) { e.currentTarget.dataset.sure = "1"; e.currentTarget.textContent = "Точно? Незаконченный урок удалится"; return; }
+          discardProgress(); startLesson(+sel.value);
+        } }, cur ? "Начать новый урок" : "▶ Начать урок"),
         el("label", { class: "row small" }, "Тема: ", sel))),
     el("section", { class: "card" },
       el("h3", {}, "Фразы вслух"),
