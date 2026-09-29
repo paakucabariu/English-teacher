@@ -13,7 +13,7 @@ const store = {
 };
 const db = {
   keys: { claude: "", ...store.get("keys", {}) },
-  settings: { silence: 2500, rate: 0.95, voice: "", autoMic: true, model: "claude-opus-5", ...store.get("settings", {}) },
+  settings: { silence: 2500, rate: 0.95, voice: "", handsFree: false, model: "claude-opus-5", ...store.get("settings", {}) },
   profile: { level: "", strengths: [], weaknesses: [], errors: [], phrases: [], unclear: {}, ...store.get("profile", {}) },
   sessions: store.get("sessions", []),
   next: store.get("next", null)
@@ -87,49 +87,67 @@ function setLive() { $("#lamp").classList.toggle("live", tts.speaking || input.a
 
 /* ================= speech input (browser speech recognition) ================= */
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-const input = { active: false, rec: null, carry: "", interim: "", lastChange: 0, firstAt: 0, timer: null, onDone: null, onUpdate: null };
+// Android Chrome repeats results in continuous mode, so there each phrase is its own recognition session.
+const CONTINUOUS = !/Android/i.test(navigator.userAgent);
+const input = { active: false, started: false, rec: null, base: "", fin: "", interim: "", lastChange: 0, firstAt: 0, timer: null, watchdog: null, opts: {} };
 let micBlocked = !SR;
 const canListen = () => !micBlocked;
-function inputText() { return (input.carry + " " + input.interim).replace(/\s+/g, " ").trim(); }
+function inputText() { return [input.base, input.fin, input.interim].join(" ").replace(/\s+/g, " ").trim(); }
 function blockMic(msg) {
+  const fail = input.opts.onFail;
   micBlocked = true; stopInput(); toast(msg);
-  if (L && !L.finished) { L.state = "idle"; lessonUI(); }
+  fail && fail(msg);
 }
-function startInput(onUpdate, onDone) {
+/* opts: onUpdate(text), onDone(text, ms), onStart() once the microphone is really on, onFail(msg), auto: send after a pause */
+function startInput(opts) {
   if (micBlocked) return false;
   stopInput();
-  Object.assign(input, { active: true, carry: "", interim: "", lastChange: Date.now(), firstAt: 0, onDone, onUpdate });
+  Object.assign(input, { active: true, started: false, base: "", fin: "", interim: "", lastChange: Date.now(), firstAt: 0, opts });
   const run = () => {
     if (!input.active) return;
     let rec;
     try { rec = new SR(); } catch { blockMic("Распознавание речи недоступно в этом браузере."); return; }
-    rec.lang = "en-US"; rec.continuous = false; rec.interimResults = true; rec.maxAlternatives = 1;
+    rec.lang = "en-US"; rec.continuous = CONTINUOUS; rec.interimResults = true; rec.maxAlternatives = 1;
+    const started = () => { if (!input.started && input.active) { input.started = true; clearTimeout(input.watchdog); input.opts.onStart && input.opts.onStart(); } };
+    rec.onstart = started; rec.onaudiostart = started;
     rec.onresult = ev => {
       let fin = "", inter = "";
       for (let i = 0; i < ev.results.length; i++) { const r = ev.results[i]; if (r.isFinal) fin += r[0].transcript + " "; else inter += r[0].transcript; }
-      if (fin) { input.carry = (input.carry + " " + fin).trim(); input.interim = ""; } else input.interim = inter;
+      input.fin = fin.trim(); input.interim = inter;
       if (!input.firstAt) input.firstAt = Date.now();
-      input.lastChange = Date.now(); input.onUpdate && input.onUpdate(inputText());
+      input.lastChange = Date.now(); input.opts.onUpdate && input.opts.onUpdate(inputText());
     };
     rec.onerror = ev => {
       if (["not-allowed", "service-not-allowed", "audio-capture"].includes(ev.error))
         blockMic("Нет доступа к микрофону. Разрешите его: Настройки → Safari → Микрофон, затем перезагрузите страницу.");
     };
-    rec.onend = () => { if (input.active) setTimeout(run, 60); };
-    try { rec.start(); input.rec = rec; } catch { stopInput(); if (L && !L.finished) { L.state = "idle"; lessonUI(); } }
+    rec.onend = () => {
+      input.base = [input.base, input.fin].join(" ").trim(); input.fin = ""; input.interim = "";
+      if (input.active) setTimeout(run, 60);
+    };
+    try { rec.start(); input.rec = rec; }
+    catch { const fail = input.opts.onFail; stopInput(); fail && fail("Микрофон не включился. Нажмите ещё раз."); }
   };
   run();
+  if (!input.active) return false;
+  // if the browser never reports that recording started, say so instead of pretending to listen
+  clearTimeout(input.watchdog);
+  input.watchdog = setTimeout(() => { if (input.active && !input.started) { const fail = input.opts.onFail; stopInput(); fail && fail("Микрофон не включился. Нажмите на кнопку ещё раз."); } }, 3000);
   clearInterval(input.timer);
-  input.timer = setInterval(() => { if (input.active && inputText() && Date.now() - input.lastChange > db.settings.silence) finishInput(); }, 200);
+  input.timer = setInterval(() => { if (input.active && input.opts.auto && inputText() && Date.now() - input.lastChange > db.settings.silence) finishInput(); }, 200);
   setLive();
-  return input.active;
+  return true;
 }
 function finishInput() {
   if (!input.active) return;
-  const text = inputText(), ms = input.firstAt ? Date.now() - input.firstAt : 0, done = input.onDone;
+  const text = inputText(), ms = input.firstAt ? Date.now() - input.firstAt : 0, done = input.opts.onDone;
   stopInput(); done && done(text, ms);
 }
-function stopInput() { input.active = false; clearInterval(input.timer); try { input.rec && input.rec.abort(); } catch {} input.rec = null; setLive(); }
+function stopInput() {
+  input.active = false; clearInterval(input.timer); clearTimeout(input.watchdog);
+  try { input.rec && input.rec.abort(); } catch {}
+  input.rec = null; setLive();
+}
 
 /* Words the recognizer fails to catch when the learner reads a known phrase: a rough signal of unclear pronunciation. */
 function wordDiff(target, heard) {
@@ -180,7 +198,7 @@ function systemPrompt() {
   const stageLines = STAGES.map((s, i) => `${i + 1}. ${s.name} (${Math.round(s.sec / 60)} min): ${s.goal}`).join("\n");
   const notes = L.notes.slice(-8).map(n => `- "${n.said}" → "${n.better}"`).join("\n") || "- (none yet)";
   let now = `CURRENT STAGE: ${L.stage + 1}. ${st.name}. Time in this stage: ${Math.round(elapsed)}s of ${st.sec}s.`;
-  if (L.justStarted && L.stage === 0 && L.turns === 0) now += "\nThe lesson is starting now: greet the learner briefly, name today's topic in a few words, and ask the first warm-up question.";
+  if (L.justStarted && L.stage === 0 && L.turns === 0) now += "\nThe lesson is starting now: say hi, say in one short sentence that you will ask questions and they just answer naturally, then ask one easy warm-up question.";
   else if (L.justStarted) now += "\nThis stage has JUST started: react to the learner's last message in one short sentence, then open this stage with a clear one-sentence transition.";
   if (L.ending) now += "\nThis is your LAST reply of the lesson: react briefly, tell the learner in one sentence what they did well today, and say their report is coming. Do not ask a question.";
   return `You are Alex, a warm, witty native English speaker and an experienced speaking coach. You are leading a live VOICE lesson with a Russian-speaking adult learner who works in IT. They understand about 95% of spoken English but struggle to put their thoughts into words. The goal is fluency and getting ideas across, not perfect grammar.
@@ -188,6 +206,8 @@ function systemPrompt() {
 HOW YOU SPEAK
 - Your spoken part is read aloud by text-to-speech: plain conversational sentences only. No lists, no markdown, no emojis, no stage names.
 - Usually 1-3 short sentences, then ONE question. Leave the learner most of the talking time.
+- This is a dialogue, not a speaking exam: ask short, concrete, easy-to-answer questions one at a time, react to what the learner said, and build the next question on it. Never ask the learner to "talk about" a topic at length or give a speech.
+- If the learner seems stuck or answers "I don't know", make it easier: offer two options ("Is it more A or B?") or ask a simpler question.
 - The learner's messages come from speech recognition and may contain recognition errors. Guess the intended meaning when it is clear. If a message is garbled or makes no sense, say you didn't quite catch it and ask them to say it again. Never treat a garbled message as a request to stop.
 - Never end, pause or wrap up the lesson on your own and never ask whether the learner wants to stop: the app controls the lesson and its stages.
 - Messages in square brackets are signals from the app, not from the learner.
@@ -220,14 +240,19 @@ First the spoken text. Then on a new line write @@META and then one line of JSON
 function startLesson(topicIdx) {
   if (!client) { setupUI(); return; }
   if (canSpeak) { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; speechSynthesis.speak(u); } // unlocks speech on iOS
-  keepAwake(true);
   L = { plan: buildPlan(topicIdx), stage: 0, stageStart: Date.now(), startedAt: Date.now(), messages: [], notes: [],
         transcript: [], turns: 0, justStarted: true, stageDone: false, ending: false, finished: false,
-        speakMs: 0, words: 0, answers: 0, longest: 0, state: "thinking", last: { text: "", ru: "", hint: "" }, showRu: false, showHint: false,
-        draft: "", ctl: null, confirmEnd: 0, tick: null, error: "" };
+        speakMs: 0, words: 0, answers: 0, longest: 0, state: "intro", last: { text: "", ru: "", hint: "" }, showRu: false, showHint: false,
+        draft: "", recStart: 0, ctl: null, confirmEnd: 0, tick: null, error: "" };
   L.messages.push({ role: "user", content: "[The learner has joined. Start the lesson.]" });
   show("lesson"); lessonUI();
-  L.tick = setInterval(() => { if (L && !L.finished) stageBar(); }, 1000);
+}
+function beginLesson() {
+  if (!L || L.state !== "intro") return;
+  if (canSpeak) { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; speechSynthesis.speak(u); }
+  keepAwake(true);
+  L.stageStart = L.startedAt = Date.now();
+  L.tick = setInterval(() => { if (L && !L.finished) { stageBar(); if (L.state === "listening") statusUI(); } }, 1000);
   aiTurn();
 }
 function maybeAdvance() {
@@ -289,7 +314,7 @@ async function aiTurn() {
     whenSpoken(() => {
       if (!L || L.finished) return;
       if (L.ending) { finishLesson(); return; }
-      if (db.settings.autoMic && canListen()) listen(); else { L.state = "idle"; lessonUI(); }
+      if (db.settings.handsFree && canListen()) listen(); else { L.state = "idle"; lessonUI(); }
     });
   } catch (e) {
     if (ctl.signal.aborted || !L) return;
@@ -299,21 +324,26 @@ async function aiTurn() {
 }
 function listen() {
   if (!L || L.finished) return;
-  stopSpeaking(); clearTimeout(L.sendTimer);
-  L.draft = "";
-  const ok = startInput(t => { L.draft = t; draftUI(); }, (t, ms) => confirmSend(t, ms));
-  L.state = ok ? "listening" : "idle"; lessonUI();
-}
-function confirmSend(text, ms) {
-  if (!L || L.finished) return;
-  if (!text.trim()) { listen(); return; }
-  L.state = "confirm"; L.draft = text; L.pendingMs = ms; lessonUI();
-  clearTimeout(L.sendTimer);
-  L.sendTimer = setTimeout(() => { if (L && L.state === "confirm") userSays(L.draft, L.pendingMs); }, 1200);
+  stopSpeaking();
+  L.draft = ""; L.error = "";
+  const ok = startInput({
+    auto: db.settings.handsFree,
+    onStart: () => { if (!L) return; L.state = "listening"; L.recStart = Date.now(); lessonUI(); },
+    onUpdate: t => { if (!L) return; L.draft = t; draftUI(); },
+    onDone: (t, ms) => {
+      if (!L || L.finished) return;
+      if (!t.trim()) { L.state = "idle"; L.error = "Я ничего не расслышал. Нажмите на микрофон и скажите ещё раз, чуть громче."; lessonUI(); return; }
+      userSays(t, ms);
+    },
+    onFail: msg => { if (!L || L.finished) return; L.state = "idle"; L.error = msg; lessonUI(); }
+  });
+  L.state = ok ? "starting" : "idle";
+  if (!ok) L.error = micBlocked ? "Микрофон недоступен: ответьте текстом ниже." : "Микрофон не включился. Нажмите ещё раз.";
+  lessonUI();
 }
 function skipStage() {
-  if (!L || L.state === "thinking") return;
-  stopInput(); stopSpeaking(); clearTimeout(L.sendTimer);
+  if (!L || L.state === "thinking" || L.state === "intro") return;
+  stopInput(); stopSpeaking();
   L.stageDone = true;
   L.messages.push({ role: "user", content: "[The learner asked to move on to the next stage.]" });
   maybeAdvance(); aiTurn();
@@ -325,7 +355,7 @@ function endLesson() {
 }
 async function finishLesson() {
   if (!L || L.finished) return;
-  L.finished = true; clearInterval(L.tick); clearTimeout(L.sendTimer);
+  L.finished = true; clearInterval(L.tick);
   stopInput(); stopSpeaking(); if (L.ctl) L.ctl.abort(); keepAwake(false);
   const s = {
     id: Date.now().toString(36), date: new Date().toISOString(), n: L.plan.n, topic: L.plan.topic, title: L.plan.title, model: db.settings.model,
@@ -478,7 +508,7 @@ function drillRecord(i) {
   if (D.busy >= 0) return;
   stopSpeaking();
   D.busy = i; drillUI();
-  const ok = startInput(() => {}, text => {
+  const ok = startInput({ auto: true, onFail: msg => { D.busy = -1; D.results[i] = { error: msg }; drillUI(); }, onDone: text => {
     D.busy = -1;
     if (!text) D.results[i] = { error: "Ничего не услышал. Нажмите «Сказать» и говорите сразу." };
     else {
@@ -487,7 +517,7 @@ function drillRecord(i) {
       D.results[i] = { diff, heard: text, score: Math.round(100 * diff.filter(x => x.ok).length / diff.length) };
     }
     drillUI();
-  });
+  } });
   if (!ok) { D.busy = -1; D.results[i] = { error: "Микрофон недоступен." }; drillUI(); }
 }
 
@@ -499,30 +529,63 @@ function stageBar() {
   $("#stageName").textContent = `${L.stage + 1}/5 · ${st.name}`;
   $("#stageTime").textContent = left > 0 ? fmtTime(left) : "+" + fmtTime(-left);
 }
-function draftUI() { const d = $("#draft"); if (d && L) d.textContent = L.draft || "Говорите…"; }
+function draftUI() {
+  const d = $("#draft"); if (!d || !L) return;
+  d.textContent = L.draft || "Говорите — здесь появится то, что я слышу";
+  d.classList.toggle("empty", !L.draft);
+}
+/* the one place that says what is happening and what to do now */
+function statusUI() {
+  if (!L) return;
+  const rec = L.recStart ? fmtTime((Date.now() - L.recStart) / 1000) : "0:00";
+  const S = {
+    thinking: ["wait", "Алекс думает…", "Секунду."],
+    speaking: ["ai", "🔊 Алекс говорит", "Слушайте. Когда он закончит, нажмите на микрофон и ответьте."],
+    idle: ["you", "Ваша очередь", L.error || (canListen() ? "Нажмите на микрофон и отвечайте по-английски. Запись идёт, пока кнопка красная." : "Микрофон недоступен: напишите ответ ниже.")],
+    starting: ["wait", "Включаю микрофон…", "Если телефон спросит разрешение на микрофон — разрешите."],
+    listening: ["rec", `● Идёт запись · ${rec}`, db.settings.handsFree ? "Говорите. После паузы ответ уйдёт сам." : "Говорите. Закончили — нажмите на красную кнопку, ответ уйдёт Алексу."],
+    error: ["err", "Не получилось", L.error || "Нажмите на кнопку, чтобы попробовать ещё раз."]
+  }[L.state] || ["wait", "", ""];
+  const st = $("#status"); st.dataset.kind = S[0];
+  $("#statusTitle").textContent = S[1];
+  $("#statusSub").textContent = S[2];
+  const label = { thinking: "", speaking: "Перебить и ответить", idle: "Нажмите, чтобы говорить", starting: "Отменить", listening: "Нажмите, чтобы отправить", error: "Повторить" }[L.state] || "";
+  $("#micLabel").textContent = label;
+  $("#micBtn").setAttribute("aria-label", label || "Микрофон");
+  $("#micBtn").dataset.state = L.state;
+}
+function chatUI() {
+  const box = $("#chat");
+  const items = L.transcript.map((t, i) => ({ ...t, last: false, i }));
+  const lastAi = items.map(t => t.who).lastIndexOf("ai");
+  if (lastAi >= 0) items[lastAi].last = true;
+  // the reply that is still being written
+  if ((L.state === "thinking" || L.state === "speaking") && L.transcript.at(-1)?.who !== "ai") items.push({ who: "ai", text: L.last.text || "…", last: true, live: true });
+  fill(box, items.length ? items.map(t => el("div", { class: "msg " + (t.who === "ai" ? "ai" : "me") },
+    el("span", { class: "who" }, t.who === "ai" ? "Алекс" : "Вы"),
+    el("p", {}, t.text),
+    t.who === "ai" && t.last && L.showRu && L.last.ru && !t.live ? el("p", { class: "ru" }, L.last.ru) : null)) : el("p", { class: "note" }, "Здесь будет ваш разговор."));
+  box.scrollTop = box.scrollHeight;
+}
 function lessonUI() {
   if (!L) return;
+  const intro = L.state === "intro";
+  $("#intro").hidden = !intro;
+  for (const id of ["#chat", "#tools", "#status", "#micWrap"]) $(id).hidden = intro;
   stageBar();
-  $("#aiText").textContent = L.last.text || (L.state === "thinking" ? "…" : "");
-  const ru = $("#aiRu"); ru.hidden = !(L.showRu && L.last.ru); ru.textContent = L.last.ru;
-  const hint = $("#hint"); hint.hidden = !(L.showHint && L.last.hint); hint.textContent = L.last.hint;
-  const labels = {
-    thinking: "Алекс думает…", speaking: "Алекс говорит · нажмите, чтобы перебить", listening: "Слушаю. Пауза — и ответ отправится",
-    confirm: "Отправляю… нажмите, чтобы сказать заново", idle: canListen() ? "Нажмите и говорите" : "Микрофон недоступен: напишите ответ ниже", error: L.error || "Ошибка"
-  };
-  $("#state").textContent = labels[L.state];
-  $("#state").classList.toggle("err", L.state === "error");
-  const b = $("#micBtn"); b.dataset.state = L.state;
-  b.setAttribute("aria-label", { listening: "Отправить сейчас", speaking: "Перебить и ответить", confirm: "Сказать заново", error: "Повторить" }[L.state] || "Говорить");
-  const d = $("#draft"); d.hidden = !(L.state === "listening" || L.state === "confirm"); d.textContent = L.draft || "Говорите…";
-  $("#doneBtn").hidden = L.state !== "listening";
-  $("#chips").replaceChildren(...L.plan.phrases.map(([en, ru]) => el("button", { class: "chip", title: ru, onclick: () => { stopInput(); stopSpeaking(); speakQueue(en); if (L) { L.state = "speaking"; lessonUI(); whenSpoken(() => listen()); } } }, en)));
+  $("#stageHint").textContent = STAGES[L.stage].ru || "";
+  if (intro) return;
+  chatUI();
+  const hint = $("#hint"); hint.hidden = !(L.showHint && L.last.hint); hint.textContent = L.last.hint ? `Можно начать так: ${L.last.hint}` : "";
+  statusUI();
+  const d = $("#draft"); d.hidden = L.state !== "listening"; draftUI();
+  $("#chips").replaceChildren(...L.plan.phrases.map(([en, ru]) => el("button", { class: "chip", title: ru, onclick: () => { if (!L || L.state === "thinking") return; stopInput(); stopSpeaking(); speakQueue(en); L.state = "speaking"; lessonUI(); whenSpoken(() => { if (L && L.state === "speaking") { L.state = "idle"; lessonUI(); } }); } }, en)));
 }
 function micPressed() {
   if (!L) return;
   switch (L.state) {
     case "listening": finishInput(); break;
-    case "confirm": clearTimeout(L.sendTimer); listen(); break;
+    case "starting": stopInput(); L.state = "idle"; lessonUI(); break;
     case "speaking": stopSpeaking(); listen(); break;
     case "error": aiTurn(); break;
     case "idle": listen(); break;
@@ -642,7 +705,8 @@ function settingsUI() {
       el("select", { id: "voiceSel", onchange: e => { st.voice = e.target.value; save("settings"); speakQueue("Hi! This is my voice."); } },
         el("option", { value: "" }, "Автоматически"), vs.map(v => el("option", { value: v.name, selected: st.voice === v.name }, `${v.name} (${v.lang})`)))) : null,
     el("p", { class: "note" }, "На iPhone качественные голоса скачиваются в Настройки → Универсальный доступ → Устный контент → Голоса → English."),
-    el("label", { class: "row small" }, el("input", { type: "checkbox", id: "autoMic", checked: st.autoMic, onchange: e => { st.autoMic = e.target.checked; save("settings"); } }), "Включать микрофон сам после ответа Алекса"),
+    el("label", { class: "row small" }, el("input", { type: "checkbox", id: "handsFree", checked: st.handsFree, onchange: e => { st.handsFree = e.target.checked; save("settings"); } }),
+      "Режим без рук: микрофон включается сам, ответ уходит после паузы (на iPhone может не работать)"),
     el("div", { class: "row" },
       el("button", { class: "btn", onclick: setupUI }, "Ключ Claude"),
       el("button", { class: "btn", onclick: exportData }, "Скачать резервную копию"),
@@ -684,24 +748,32 @@ $("#saveKey").addEventListener("click", async () => {
 $("#micTest").addEventListener("click", () => {
   const out = $("#micOut"); out.hidden = false;
   if (micBlocked) { out.textContent = SR ? "Нет доступа к микрофону. Разрешите его в настройках браузера." : "Этот браузер не распознаёт речь. Откройте страницу в Safari (iPhone) или Chrome."; return; }
-  out.textContent = "Скажите что-нибудь по-английски…";
-  const ok = startInput(t => out.textContent = t, t => out.textContent = t ? `Работает. Распознано: «${t}».` : "Ничего не услышал. Нажмите ещё раз и говорите сразу.");
+  out.textContent = "Включаю микрофон…";
+  const ok = startInput({
+    auto: true,
+    onStart: () => { out.textContent = "● Идёт запись. Скажите что-нибудь по-английски…"; },
+    onUpdate: t => { out.textContent = "● " + t; },
+    onDone: t => { out.textContent = t ? `Работает. Распознано: «${t}».` : "Ничего не услышал. Нажмите ещё раз и говорите сразу."; },
+    onFail: msg => { out.textContent = msg; }
+  });
   if (!ok) out.textContent = "Не удалось включить микрофон.";
 });
 
 /* ================= wiring ================= */
+// after a replayed line the learner answers when ready (hands-free mode starts the mic itself)
+const afterReplay = () => { tts.rateMul = 1; if (!L || L.finished || L.state !== "speaking") return; if (db.settings.handsFree && canListen()) listen(); else { L.state = "idle"; lessonUI(); } };
 $("#micBtn").addEventListener("click", micPressed);
-$("#doneBtn").addEventListener("click", () => finishInput());
-$("#repeatBtn").addEventListener("click", () => { if (!L || !L.last.text) return; stopInput(); stopSpeaking(); tts.rateMul = 1; speakQueue(L.last.text); L.state = "speaking"; lessonUI(); whenSpoken(() => listen()); });
-$("#slowBtn").addEventListener("click", () => { if (!L || !L.last.text) return; stopInput(); stopSpeaking(); tts.rateMul = 0.75; speakQueue(L.last.text); L.state = "speaking"; lessonUI(); whenSpoken(() => { tts.rateMul = 1; listen(); }); });
+$("#beginBtn").addEventListener("click", beginLesson);
+$("#repeatBtn").addEventListener("click", () => { if (!L || !L.last.text || L.state === "thinking") return; stopInput(); stopSpeaking(); tts.rateMul = 1; speakQueue(L.last.text); L.state = "speaking"; lessonUI(); whenSpoken(afterReplay); });
+$("#slowBtn").addEventListener("click", () => { if (!L || !L.last.text || L.state === "thinking") return; stopInput(); stopSpeaking(); tts.rateMul = 0.75; speakQueue(L.last.text); L.state = "speaking"; lessonUI(); whenSpoken(afterReplay); });
 $("#ruBtn").addEventListener("click", () => { if (!L) return; L.showRu = !L.showRu; lessonUI(); });
 $("#hintBtn").addEventListener("click", () => { if (!L) return; L.showHint = !L.showHint; lessonUI(); });
 $("#skipBtn").addEventListener("click", skipStage);
 $("#endBtn").addEventListener("click", endLesson);
 $("#typeForm").addEventListener("submit", e => {
   e.preventDefault();
-  const t = $("#typeInput").value.trim(); if (!t || !L || L.state === "thinking") return;
-  $("#typeInput").value = ""; stopInput(); stopSpeaking(); clearTimeout(L.sendTimer); userSays(t, 0);
+  const t = $("#typeInput").value.trim(); if (!t || !L || L.state === "thinking" || L.state === "intro") return;
+  $("#typeInput").value = ""; stopInput(); stopSpeaking(); userSays(t, 0);
 });
 $("#homeLink").addEventListener("click", () => { if (L && !L.finished) { toast("Сначала завершите урок кнопкой «Закончить»"); return; } homeUI(); });
 if (canSpeak) speechSynthesis.onvoiceschanged = () => { if (!$("#home").hidden) settingsUI(); };
