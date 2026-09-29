@@ -4,37 +4,6 @@ import { STAGES, TOPICS } from "./lessons.js";
 /* ================= configuration ================= */
 const MODELS = { "claude-opus-5": "Opus 5 — самый сильный", "claude-sonnet-5": "Sonnet 5 — дешевле и быстрее" };
 const BETAS = ["server-side-fallback-2026-07-01"];
-const SDK = window.SpeechSDK; // Azure Speech SDK, loaded by a classic script tag
-
-// Russian articulation hints for sounds Russian speakers usually find hard (IPA)
-const SOUND_TIPS = {
-  "θ": "Как в think: кончик языка между зубами, дуйте воздух. Не «с» и не «ф».",
-  "ð": "Как в this: язык между зубами, со звонким голосом. Не «з» и не «д».",
-  "w": "Как в we: губы трубочкой, потом резко раскрыть. Не «в»: зубы губу не трогают.",
-  "v": "Как в very: верхние зубы касаются нижней губы.",
-  "r": "Как в right: язык загнут назад и не касается нёба, без раската «р».",
-  "ɹ": "Как в right: язык загнут назад и не касается нёба, без раската «р».",
-  "h": "Как в house: просто выдох, мягче русского «х».",
-  "ŋ": "Как в thinking: задняя часть языка к нёбу, звук в нос, без «г» в конце.",
-  "æ": "Как в cat: рот широко, между «а» и «э».",
-  "ɪ": "Как в ship: короткий расслабленный звук, ближе к «ы/и».",
-  "i": "Как в sheep: длинный, губы в улыбке.",
-  "iː": "Как в sheep: длинный, губы в улыбке.",
-  "ʊ": "Как в book: короткий, губы слегка округлены.",
-  "u": "Как в food: длинный, губы вперёд.",
-  "uː": "Как в food: длинный, губы вперёд.",
-  "ɜ": "Как в work: язык в центре, губы нейтральны, не «о».",
-  "ɝ": "Как в work: язык в центре и загнут, не «о» и не «ёр».",
-  "ə": "Безударный нейтральный звук, как в about. Не выговаривайте чётко «а» или «о».",
-  "ʌ": "Как в cup: короткое «а», рот приоткрыт.",
-  "d": "Кончик языка на бугорках за верхними зубами, не на зубах.",
-  "t": "Кончик языка на бугорках за зубами, с придыханием в начале слова.",
-  "l": "В конце слова тёмный: как в feel, язык глубже.",
-  "z": "Звонкое окончание, как в plays: не оглушайте в «с».",
-  "ʒ": "Как в usually: мягкий звонкий, ближе к «ж».",
-  "dʒ": "Как в job: слитно «дж».",
-  "tʃ": "Как в check: слитно «тч», мягче русского «ч»."
-};
 
 /* ================= storage ================= */
 const K = "coach:";
@@ -43,9 +12,9 @@ const store = {
   set(k, v) { try { localStorage.setItem(K + k, JSON.stringify(v)); } catch { toast("Не удалось сохранить: память браузера заполнена или отключена"); } }
 };
 const db = {
-  keys: { claude: "", azure: "", region: "", ...store.get("keys", {}) },
+  keys: { claude: "", ...store.get("keys", {}) },
   settings: { silence: 2500, rate: 0.95, voice: "", autoMic: true, model: "claude-opus-5", ...store.get("settings", {}) },
-  profile: { level: "", strengths: [], weaknesses: [], errors: [], phrases: [], phonemes: {}, ...store.get("profile", {}) },
+  profile: { level: "", strengths: [], weaknesses: [], errors: [], phrases: [], unclear: {}, ...store.get("profile", {}) },
   sessions: store.get("sessions", []),
   next: store.get("next", null)
 };
@@ -70,11 +39,9 @@ const words = s => (s.trim().match(/[A-Za-zА-Яа-яЁё0-9']+/g) || []).length
 const fmtTime = s => `${Math.floor(s / 60)}:${String(Math.max(0, Math.floor(s % 60))).padStart(2, "0")}`;
 const dayKey = d => new Date(d).toISOString().slice(0, 10);
 const norm = s => String(s || "").toLowerCase().replace(/[^a-z0-9' ]/g, "").trim();
-const avg = a => a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : 0;
 function show(screen) { for (const s of ["setup", "home", "lesson", "report", "drill"]) $("#" + s).hidden = s !== screen; window.scrollTo(0, 0); }
 let client = null;
 function makeClient() { client = db.keys.claude ? new Anthropic({ apiKey: db.keys.claude, dangerouslyAllowBrowser: true }) : null; }
-const hasAzure = () => !!(SDK && db.keys.azure && db.keys.region);
 function apiError(e) {
   if (e instanceof Anthropic.AuthenticationError) return "Ключ Claude не подошёл. Проверьте его в настройках.";
   if (e instanceof Anthropic.PermissionDeniedError) return "У ключа Claude нет доступа к модели. Проверьте аккаунт в консоли Anthropic.";
@@ -118,132 +85,25 @@ function stopSpeaking() { tts.q = []; tts.onIdle = null; if (canSpeak) speechSyn
 function whenSpoken(f) { if (!tts.speaking && !tts.q.length) f(); else tts.onIdle = f; }
 function setLive() { $("#lamp").classList.toggle("live", tts.speaking || input.active); }
 
-/* ================= pronunciation (Azure) ================= */
-function azConfig() {
-  const cfg = SDK.SpeechConfig.fromSubscription(db.keys.azure, db.keys.region);
-  cfg.speechRecognitionLanguage = "en-US";
-  cfg.outputFormat = SDK.OutputFormat.Detailed;
-  cfg.setProperty(SDK.PropertyId.Speech_SegmentationSilenceTimeoutMs, "1200");
-  return cfg;
-}
-function azRecognizer(reference) {
-  const r = new SDK.SpeechRecognizer(azConfig(), SDK.AudioConfig.fromDefaultMicrophoneInput());
-  const pc = new SDK.PronunciationAssessmentConfig(reference || "", SDK.PronunciationAssessmentGradingSystem.HundredMark, SDK.PronunciationAssessmentGranularity.Phoneme, !!reference);
-  pc.phonemeAlphabet = "IPA";
-  pc.nbestPhonemeCount = 3;
-  pc.enableProsodyAssessment = true;
-  pc.applyTo(r);
-  return r;
-}
-function parsePron(result) {
-  let j; try { j = JSON.parse(result.properties.getProperty(SDK.PropertyId.SpeechServiceResponse_JsonResult)); } catch { return null; }
-  const nb = j && j.NBest && j.NBest[0]; if (!nb) return null;
-  const pa = nb.PronunciationAssessment || {};
-  return {
-    text: nb.Display || j.DisplayText || "",
-    acc: pa.AccuracyScore, flu: pa.FluencyScore, pros: pa.ProsodyScore, pron: pa.PronScore, comp: pa.CompletenessScore,
-    words: (nb.Words || []).map(w => ({
-      w: w.Word, acc: w.PronunciationAssessment ? w.PronunciationAssessment.AccuracyScore : null, err: w.PronunciationAssessment ? w.PronunciationAssessment.ErrorType : "None",
-      ph: (w.Phonemes || []).map(p => ({
-        p: p.Phoneme, acc: p.PronunciationAssessment ? p.PronunciationAssessment.AccuracyScore : null,
-        heard: (p.PronunciationAssessment && p.PronunciationAssessment.NBestPhonemes || []).map(x => x.Phoneme).find(x => x !== p.Phoneme) || ""
-      }))
-    }))
-  };
-}
-function azError(e) {
-  const code = e && e.errorCode;
-  if (code === SDK.CancellationErrorCode.AuthenticationFailure) return "Ключ Azure или регион не подошли. Проверьте их в настройках.";
-  if (code === SDK.CancellationErrorCode.ConnectionFailure) return "Нет связи с Azure. Проверьте интернет.";
-  return "Ошибка распознавания речи" + (e && e.errorDetails ? `: ${e.errorDetails}` : ".");
-}
-/* weakest sounds and words across a list of assessed segments */
-function summarizePron(segs) {
-  segs = segs.filter(s => s && s.words && s.words.length);
-  if (!segs.length) return null;
-  const words = {}, phon = {};
-  for (const s of segs) for (const w of s.words) {
-    if (w.err === "Insertion" || w.err === "Omission") continue;
-    for (const p of w.ph) {
-      if (!p.p || p.acc == null) continue;
-      const x = phon[p.p] ||= { t: 0, l: 0, ex: [], heard: {} };
-      x.t++;
-      if (p.acc < 60) { x.l++; if (x.ex.length < 4 && !x.ex.includes(w.w)) x.ex.push(w.w); if (p.heard) x.heard[p.heard] = (x.heard[p.heard] || 0) + 1; }
-    }
-    if (w.acc != null && (w.acc < 70 || w.err === "Mispronunciation")) {
-      const k = norm(w.w); const x = words[k] ||= { w: w.w, n: 0, min: 100, bad: [] };
-      x.n++; x.min = Math.min(x.min, Math.round(w.acc));
-      for (const p of w.ph) if (p.acc != null && p.acc < 60 && !x.bad.includes(p.p)) x.bad.push(p.p);
-    }
-  }
-  return {
-    n: segs.length,
-    acc: avg(segs.map(s => s.acc || 0)), flu: avg(segs.map(s => s.flu || 0)),
-    pros: avg(segs.filter(s => s.pros != null).map(s => s.pros)), pron: avg(segs.map(s => s.pron || 0)),
-    badWords: Object.values(words).sort((a, b) => b.n - a.n || a.min - b.min).slice(0, 12),
-    phonemes: phon
-  };
-}
-function mergePhonemes(stats) {
-  const P = db.profile.phonemes ||= {};
-  for (const [p, x] of Object.entries(stats || {})) {
-    const y = P[p] ||= { t: 0, l: 0, ex: [] };
-    y.t += x.t; y.l += x.l;
-    for (const w of x.ex) if (!y.ex.includes(w)) y.ex.unshift(w);
-    y.ex = y.ex.slice(0, 5);
-  }
-  save("profile");
-}
-function weakSounds(stats, minTotal = 4, max = 6) {
-  return Object.entries(stats || {}).filter(([, x]) => x.t >= minTotal && x.l / x.t >= 0.15)
-    .sort((a, b) => b[1].l / b[1].t - a[1].l / a[1].t).slice(0, max)
-    .map(([p, x]) => ({ p, rate: Math.round(100 * x.l / x.t), ex: x.ex, heard: Object.entries(x.heard || {}).sort((a, b) => b[1] - a[1]).map(h => h[0])[0] || "" }));
-}
-
-/* ================= speech input: Azure (with pronunciation) or browser ================= */
+/* ================= speech input (browser speech recognition) ================= */
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-const input = { active: false, kind: "", rec: null, segs: [], interim: "", carry: "", lastChange: 0, firstAt: 0, timer: null, onDone: null, onUpdate: null, stopping: false };
-let browserMicBlocked = !SR;
-const canListen = () => hasAzure() || !browserMicBlocked;
-function inputText() {
-  const base = input.kind === "azure" ? input.segs.map(s => s.text).join(" ") : input.carry;
-  return (base + " " + input.interim).replace(/\s+/g, " ").trim();
+const input = { active: false, rec: null, carry: "", interim: "", lastChange: 0, firstAt: 0, timer: null, onDone: null, onUpdate: null };
+let micBlocked = !SR;
+const canListen = () => !micBlocked;
+function inputText() { return (input.carry + " " + input.interim).replace(/\s+/g, " ").trim(); }
+function blockMic(msg) {
+  micBlocked = true; stopInput(); toast(msg);
+  if (L && !L.finished) { L.state = "idle"; lessonUI(); }
 }
 function startInput(onUpdate, onDone) {
+  if (micBlocked) return false;
   stopInput();
-  Object.assign(input, { active: true, segs: [], interim: "", carry: "", lastChange: Date.now(), firstAt: 0, onDone, onUpdate, stopping: false });
-  if (hasAzure()) startAzure(); else if (!browserMicBlocked) startBrowser(); else { input.active = false; return false; }
-  clearInterval(input.timer);
-  input.timer = setInterval(() => {
-    if (input.active && !input.stopping && inputText() && !input.interim && Date.now() - input.lastChange > db.settings.silence) finishInput();
-  }, 200);
-  setLive();
-  return true;
-}
-function startAzure() {
-  input.kind = "azure";
-  let r;
-  try { r = azRecognizer(""); } catch { input.active = false; toast("Не удалось запустить распознавание Azure"); return; }
-  input.rec = r;
-  r.recognizing = (_, e) => { if (!input.firstAt) input.firstAt = Date.now(); input.interim = e.result.text; input.lastChange = Date.now(); input.onUpdate && input.onUpdate(inputText()); };
-  r.recognized = (_, e) => {
-    if (e.result.reason === SDK.ResultReason.RecognizedSpeech && e.result.text) {
-      input.segs.push({ text: e.result.text, pron: parsePron(e.result) });
-      input.interim = ""; input.lastChange = Date.now(); input.onUpdate && input.onUpdate(inputText());
-    } else { input.interim = ""; }
-  };
-  r.canceled = (_, e) => {
-    if (e.reason === SDK.CancellationReason.Error) { const msg = azError(e); stopInput(); toast(msg); if (L && !L.finished) { L.state = "idle"; lessonUI(); } }
-  };
-  r.startContinuousRecognitionAsync(() => {}, err => { stopInput(); toast("Нет доступа к микрофону: " + err); if (L && !L.finished) { L.state = "idle"; lessonUI(); } });
-}
-function startBrowser() {
-  input.kind = "browser";
+  Object.assign(input, { active: true, carry: "", interim: "", lastChange: Date.now(), firstAt: 0, onDone, onUpdate });
   const run = () => {
-    if (!input.active || input.kind !== "browser") return;
+    if (!input.active) return;
     let rec;
-    try { rec = new SR(); } catch { browserMicBlocked = true; stopInput(); return; }
-    rec.lang = "en-US"; rec.continuous = false; rec.interimResults = true;
+    try { rec = new SR(); } catch { blockMic("Распознавание речи недоступно в этом браузере."); return; }
+    rec.lang = "en-US"; rec.continuous = false; rec.interimResults = true; rec.maxAlternatives = 1;
     rec.onresult = ev => {
       let fin = "", inter = "";
       for (let i = 0; i < ev.results.length; i++) { const r = ev.results[i]; if (r.isFinal) fin += r[0].transcript + " "; else inter += r[0].transcript; }
@@ -251,28 +111,50 @@ function startBrowser() {
       if (!input.firstAt) input.firstAt = Date.now();
       input.lastChange = Date.now(); input.onUpdate && input.onUpdate(inputText());
     };
-    rec.onerror = ev => { if (["not-allowed", "service-not-allowed", "audio-capture"].includes(ev.error)) { browserMicBlocked = true; stopInput(); toast("Нет доступа к микрофону. Разрешите его в настройках браузера."); if (L && !L.finished) { L.state = "idle"; lessonUI(); } } };
-    rec.onend = () => { input.interim = ""; if (input.active && input.kind === "browser") setTimeout(run, 60); };
+    rec.onerror = ev => {
+      if (["not-allowed", "service-not-allowed", "audio-capture"].includes(ev.error))
+        blockMic("Нет доступа к микрофону. Разрешите его: Настройки → Safari → Микрофон, затем перезагрузите страницу.");
+    };
+    rec.onend = () => { if (input.active) setTimeout(run, 60); };
     try { rec.start(); input.rec = rec; } catch { stopInput(); if (L && !L.finished) { L.state = "idle"; lessonUI(); } }
   };
   run();
+  clearInterval(input.timer);
+  input.timer = setInterval(() => { if (input.active && inputText() && Date.now() - input.lastChange > db.settings.silence) finishInput(); }, 200);
+  setLive();
+  return input.active;
 }
 function finishInput() {
-  if (!input.active || input.stopping) return;
-  input.stopping = true; clearInterval(input.timer);
-  const done = input.onDone, ms = input.firstAt ? Date.now() - input.firstAt : 0;
-  const deliver = () => { const text = inputText(), prons = input.segs.map(s => s.pron).filter(Boolean); stopInput(); done && done(text, ms, prons); };
-  if (input.kind === "azure" && input.rec) input.rec.stopContinuousRecognitionAsync(deliver, deliver);
-  else deliver();
+  if (!input.active) return;
+  const text = inputText(), ms = input.firstAt ? Date.now() - input.firstAt : 0, done = input.onDone;
+  stopInput(); done && done(text, ms);
 }
-function stopInput() {
-  const r = input.rec, kind = input.kind;
-  input.active = false; input.stopping = false; clearInterval(input.timer); input.rec = null;
-  if (r) {
-    if (kind === "azure") { try { r.stopContinuousRecognitionAsync(() => r.close(), () => r.close()); } catch { try { r.close(); } catch {} } }
-    else { try { r.abort(); } catch {} }
+function stopInput() { input.active = false; clearInterval(input.timer); try { input.rec && input.rec.abort(); } catch {} input.rec = null; setLive(); }
+
+/* Words the recognizer fails to catch when the learner reads a known phrase: a rough signal of unclear pronunciation. */
+function wordDiff(target, heard) {
+  const t = target.split(/\s+/).filter(Boolean), tn = t.map(norm), h = heard.split(/\s+/).map(norm).filter(Boolean);
+  const dp = Array.from({ length: t.length + 1 }, () => new Array(h.length + 1).fill(0));
+  for (let i = t.length - 1; i >= 0; i--) for (let j = h.length - 1; j >= 0; j--)
+    dp[i][j] = tn[i] && tn[i] === h[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const ok = new Array(t.length).fill(false);
+  for (let i = 0, j = 0; i < t.length && j < h.length;) {
+    if (tn[i] && tn[i] === h[j]) { ok[i] = true; i++; j++; } else if (dp[i + 1][j] >= dp[i][j + 1]) i++; else j++;
   }
-  setLive();
+  return t.map((w, i) => ({ w, ok: ok[i] || !tn[i] }));
+}
+function recordUnclear(diff) {
+  const U = db.profile.unclear ||= {};
+  for (const { w, ok } of diff) {
+    const k = norm(w); if (k.length < 2) continue;
+    const x = U[k] ||= { w: w.replace(/[^A-Za-z']/g, ""), t: 0, miss: 0 };
+    x.t++; if (!ok) x.miss++;
+  }
+  save("profile");
+}
+function unclearWords(max = 8) {
+  return Object.values(db.profile.unclear || {}).filter(x => x.miss >= 2 && x.miss / x.t >= 0.4)
+    .sort((a, b) => b.miss / b.t - a.miss / a.t || b.miss - a.miss).slice(0, max);
 }
 
 /* ================= lesson plan ================= */
@@ -287,7 +169,7 @@ function buildPlan(topicIdx) {
     focus: db.next && db.next.focus || "",
     drill: [...new Set([...(db.next && db.next.drill || []), ...openErrors.map(e => `${e.wrong} → ${e.right}`)])].slice(0, 4),
     lastPhrases: (db.sessions.at(-1) && db.sessions.at(-1).phrases || []).map(p => p[0]).slice(0, 3),
-    sounds: weakSounds(db.profile.phonemes).slice(0, 3).map(s => `/${s.p}/ (e.g. ${s.ex.slice(0, 2).join(", ")})`)
+    unclear: unclearWords(5).map(x => x.w)
   };
 }
 
@@ -297,12 +179,11 @@ function systemPrompt() {
   const p = L.plan, st = STAGES[L.stage], elapsed = (Date.now() - L.stageStart) / 1000, prof = db.profile;
   const stageLines = STAGES.map((s, i) => `${i + 1}. ${s.name} (${Math.round(s.sec / 60)} min): ${s.goal}`).join("\n");
   const notes = L.notes.slice(-8).map(n => `- "${n.said}" → "${n.better}"`).join("\n") || "- (none yet)";
-  const lastPron = L.lastPron && L.lastPron.badWords.length ? `Pronunciation of the learner's last answer (automatic assessment): mispronounced ${L.lastPron.badWords.slice(0, 4).map(w => `"${w.w}"${w.bad.length ? " (/" + w.bad.join("/, /") + "/)" : ""}`).join(", ")}.` : "";
   let now = `CURRENT STAGE: ${L.stage + 1}. ${st.name}. Time in this stage: ${Math.round(elapsed)}s of ${st.sec}s.`;
   if (L.justStarted && L.stage === 0 && L.turns === 0) now += "\nThe lesson is starting now: greet the learner briefly, name today's topic in a few words, and ask the first warm-up question.";
   else if (L.justStarted) now += "\nThis stage has JUST started: react to the learner's last message in one short sentence, then open this stage with a clear one-sentence transition.";
   if (L.ending) now += "\nThis is your LAST reply of the lesson: react briefly, tell the learner in one sentence what they did well today, and say their report is coming. Do not ask a question.";
-  return `You are Alex, a warm, witty native English speaker and an experienced speaking coach. You are leading a live VOICE lesson with a Russian-speaking adult learner who works in IT. They understand about 95% of spoken English but struggle to put their thoughts into words. The goal is fluency and getting ideas across first, then clear pronunciation.
+  return `You are Alex, a warm, witty native English speaker and an experienced speaking coach. You are leading a live VOICE lesson with a Russian-speaking adult learner who works in IT. They understand about 95% of spoken English but struggle to put their thoughts into words. The goal is fluency and getting ideas across, not perfect grammar.
 
 HOW YOU SPEAK
 - Your spoken part is read aloud by text-to-speech: plain conversational sentences only. No lists, no markdown, no emojis, no stage names.
@@ -310,7 +191,7 @@ HOW YOU SPEAK
 - The learner's messages come from speech recognition and may contain recognition errors. Guess the intended meaning when it is clear. If a message is garbled or makes no sense, say you didn't quite catch it and ask them to say it again. Never treat a garbled message as a request to stop.
 - Never end, pause or wrap up the lesson on your own and never ask whether the learner wants to stop: the app controls the lesson and its stages.
 - Messages in square brackets are signals from the app, not from the learner.
-- Pronunciation: during stages 2 and 5 you may briefly model one mispronounced word ("Try: 'think', with your tongue between your teeth") and ask them to repeat it. In other stages do not interrupt for pronunciation.
+- You only get the recognized text, not the learner's voice, so do not judge pronunciation. If a word was clearly misrecognized, you may say how it is pronounced and ask the learner to repeat it slowly (stages 2 and 5 only).
 
 LESSON ${p.n}: "${p.title}". Topic for discussion: ${p.talk}.
 Target phrases: ${p.phrases.map(x => x[0]).join(" | ")}.
@@ -318,7 +199,7 @@ ${p.lastPhrases.length ? `Phrases from the last lesson to recycle in the warm-up
 Role-play situation: ${p.role}
 ${p.focus ? `Coach's focus for today (from the last analysis): ${p.focus}` : ""}
 ${p.drill.length ? `Known weak spots to watch for: ${p.drill.join("; ")}` : ""}
-${p.sounds.length ? `Sounds the learner often mispronounces: ${p.sounds.join("; ")}.` : ""}
+${p.unclear.length ? `Words speech recognition often fails to catch from this learner (possible pronunciation issue): ${p.unclear.join(", ")}.` : ""}
 Learner profile: ${prof.level ? "level " + prof.level + "; " : ""}${(prof.weaknesses || []).slice(0, 4).join("; ") || "no history yet"}.
 
 STAGES (the app moves between them)
@@ -328,7 +209,6 @@ ${now}
 
 MISTAKES LOGGED SO FAR TODAY
 ${notes}
-${lastPron}
 
 OUTPUT FORMAT
 First the spoken text. Then on a new line write @@META and then one line of JSON:
@@ -341,7 +221,7 @@ function startLesson(topicIdx) {
   if (!client) { setupUI(); return; }
   if (canSpeak) { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; speechSynthesis.speak(u); } // unlocks speech on iOS
   keepAwake(true);
-  L = { plan: buildPlan(topicIdx), stage: 0, stageStart: Date.now(), startedAt: Date.now(), messages: [], notes: [], prons: [], lastPron: null,
+  L = { plan: buildPlan(topicIdx), stage: 0, stageStart: Date.now(), startedAt: Date.now(), messages: [], notes: [],
         transcript: [], turns: 0, justStarted: true, stageDone: false, ending: false, finished: false,
         speakMs: 0, words: 0, answers: 0, longest: 0, state: "thinking", last: { text: "", ru: "", hint: "" }, showRu: false, showHint: false,
         draft: "", ctl: null, confirmEnd: 0, tick: null, error: "" };
@@ -356,15 +236,12 @@ function maybeAdvance() {
   if (L.stage < STAGES.length - 1 && (L.stageDone || elapsed >= st.sec)) { L.stage++; L.stageStart = Date.now(); L.justStarted = true; L.stageDone = false; }
   else if (L.stage === STAGES.length - 1 && (L.stageDone || elapsed >= st.sec)) L.ending = true;
 }
-function userSays(text, ms, prons) {
+function userSays(text, ms) {
   text = (text || "").trim();
   if (!L || L.finished) return;
   if (!text) { listen(); return; }
   L.answers++; const w = words(text); L.words += w; L.longest = Math.max(L.longest, w); L.speakMs += ms || 0;
-  const answerPron = prons && prons.length ? summarizePron(prons) : null;
-  if (prons && prons.length) L.prons.push(...prons);
-  L.lastPron = answerPron;
-  L.transcript.push({ who: "me", text, pron: answerPron ? answerPron.pron : null });
+  L.transcript.push({ who: "me", text });
   L.messages.push({ role: "user", content: text });
   L.turns++;
   maybeAdvance();
@@ -424,15 +301,15 @@ function listen() {
   if (!L || L.finished) return;
   stopSpeaking(); clearTimeout(L.sendTimer);
   L.draft = "";
-  const ok = startInput(t => { L.draft = t; draftUI(); }, (t, ms, prons) => confirmSend(t, ms, prons));
+  const ok = startInput(t => { L.draft = t; draftUI(); }, (t, ms) => confirmSend(t, ms));
   L.state = ok ? "listening" : "idle"; lessonUI();
 }
-function confirmSend(text, ms, prons) {
+function confirmSend(text, ms) {
   if (!L || L.finished) return;
   if (!text.trim()) { listen(); return; }
-  L.state = "confirm"; L.draft = text; L.pending = { ms, prons }; lessonUI();
+  L.state = "confirm"; L.draft = text; L.pendingMs = ms; lessonUI();
   clearTimeout(L.sendTimer);
-  L.sendTimer = setTimeout(() => { if (L && L.state === "confirm") userSays(L.draft, L.pending.ms, L.pending.prons); }, 1200);
+  L.sendTimer = setTimeout(() => { if (L && L.state === "confirm") userSays(L.draft, L.pendingMs); }, 1200);
 }
 function skipStage() {
   if (!L || L.state === "thinking") return;
@@ -450,17 +327,13 @@ async function finishLesson() {
   if (!L || L.finished) return;
   L.finished = true; clearInterval(L.tick); clearTimeout(L.sendTimer);
   stopInput(); stopSpeaking(); if (L.ctl) L.ctl.abort(); keepAwake(false);
-  const pron = summarizePron(L.prons);
   const s = {
     id: Date.now().toString(36), date: new Date().toISOString(), n: L.plan.n, topic: L.plan.topic, title: L.plan.title, model: db.settings.model,
     durationSec: Math.round((Date.now() - L.startedAt) / 1000), speakSec: Math.round(L.speakMs / 1000),
     words: L.words, answers: L.answers, longest: L.longest, avgWords: L.answers ? Math.round(L.words / L.answers * 10) / 10 : 0,
     stagesReached: L.stage + 1, phrases: L.plan.phrases, notes: L.notes, transcript: L.transcript.slice(-80),
-    pron: pron ? { n: pron.n, acc: pron.acc, flu: pron.flu, pros: pron.pros, pron: pron.pron, badWords: pron.badWords } : null,
     report: null
   };
-  if (pron) mergePhonemes(pron.phonemes);
-  s.weakSounds = pron ? weakSounds(pron.phonemes, 3, 5) : [];
   db.sessions.push(s); save("sessions");
   L = null;
   if (s.answers < 3) { reportView(s, "Урок слишком короткий для разбора: меньше трёх ответов. Статистика сохранена."); return; }
@@ -471,7 +344,7 @@ async function finishLesson() {
 /* ================= report ================= */
 const REPORT_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: ["summary", "wins", "mistakes", "scores", "level", "strengths", "weaknesses", "patterns", "phrasesUsed", "pronunciation", "next"],
+  required: ["summary", "wins", "mistakes", "scores", "level", "strengths", "weaknesses", "patterns", "phrasesUsed", "next"],
   properties: {
     summary: { type: "string" },
     wins: { type: "array", items: { type: "string" } },
@@ -485,8 +358,6 @@ const REPORT_SCHEMA = {
     patterns: { type: "array", items: { type: "object", additionalProperties: false, required: ["wrong", "right"],
       properties: { wrong: { type: "string" }, right: { type: "string" } } } },
     phrasesUsed: { type: "array", items: { type: "string" } },
-    pronunciation: { type: "object", additionalProperties: false, required: ["summary", "tips"],
-      properties: { summary: { type: "string" }, tips: { type: "array", items: { type: "string" } } } },
     next: { type: "object", additionalProperties: false, required: ["focus", "phrases", "drill"],
       properties: { focus: { type: "string" },
         phrases: { type: "array", items: { type: "object", additionalProperties: false, required: ["en", "ru"], properties: { en: { type: "string" }, ru: { type: "string" } } } },
@@ -497,21 +368,15 @@ async function makeReport(s) {
   if (!client) { reportView(s, "Для разбора нужен ключ Claude."); return; }
   const nextTopic = (s.topic + 1) % TOPICS.length;
   const history = db.sessions.filter(x => x.report && x.id !== s.id).slice(-5)
-    .map(x => `Lesson ${x.n} (${x.title}): fluency ${x.report.scores.fluency}, clarity ${x.report.scores.clarity}, vocabulary ${x.report.scores.vocabulary}, confidence ${x.report.scores.confidence}; avg ${x.avgWords} words per answer${x.pron ? `; pronunciation ${x.pron.pron}/100` : ""}.`).join("\n") || "(first lesson)";
+    .map(x => `Lesson ${x.n} (${x.title}): fluency ${x.report.scores.fluency}, clarity ${x.report.scores.clarity}, vocabulary ${x.report.scores.vocabulary}, confidence ${x.report.scores.confidence}; avg ${x.avgWords} words per answer.`).join("\n") || "(first lesson)";
   const errors = db.profile.errors.filter(e => e.status !== "fixed").map(e => `${e.wrong} → ${e.right} (seen ${e.count}x)`).join("; ") || "none yet";
-  const pronText = s.pron
-    ? `Automatic pronunciation assessment (0-100): overall ${s.pron.pron}, accuracy ${s.pron.acc}, fluency ${s.pron.flu}, prosody ${s.pron.pros}.
-Mispronounced words: ${s.pron.badWords.map(w => `${w.w} (x${w.n}, ${w.min}${w.bad.length ? ", weak /" + w.bad.join("/, /") + "/" : ""})`).join("; ") || "none"}.
-Weakest sounds today (IPA, % of low scores): ${s.weakSounds.map(x => `/${x.p}/ ${x.rate}%${x.heard ? " (sounded like /" + x.heard + "/)" : ""} e.g. ${x.ex.join(", ")}`).join("; ") || "none"}.`
-    : "No pronunciation assessment for this lesson.";
   const tr = s.transcript.map(t => (t.who === "me" ? "LEARNER: " : "COACH: ") + t.text).join("\n");
-  const prompt = `You are an expert English speaking coach. Analyse this voice lesson of a Russian-speaking IT professional (understands ~95%, struggles to express thoughts). Fluency and getting ideas across matter most, then pronunciation. The learner's lines come from speech recognition: ignore obvious recognition errors.
+  const prompt = `You are an expert English speaking coach. Analyse this voice lesson of a Russian-speaking IT professional (understands ~95%, struggles to express thoughts). Fluency and getting ideas across matter more than grammar. The learner's lines come from speech recognition: ignore obvious recognition errors.
 
 Lesson ${s.n}: "${s.title}". Target phrases: ${s.phrases.map(p => p[0]).join(" | ")}.
 Metrics: ${s.answers} answers, ${s.words} words, average ${s.avgWords} words per answer, longest ${s.longest} words, speaking time ${s.speakSec}s, stages reached ${s.stagesReached} of 5.
 Mistakes the coach logged during the lesson: ${s.notes.map(n => `"${n.said}" → "${n.better}"`).join("; ") || "none"}.
 Known recurring errors: ${errors}.
-${pronText}
 Earlier lessons:
 ${history}
 
@@ -527,8 +392,7 @@ Write the report in Russian (English examples stay in English):
 - strengths / weaknesses: up-to-date profile (up to 4 each), merging earlier knowledge with today.
 - patterns: recurring error patterns worth drilling (wrong → right), up to 5.
 - phrasesUsed: which of today's target phrases the learner actually used (exact English text from the list).
-- pronunciation: summary = 1-2 sentences on pronunciation from the assessment data (or say there was no assessment); tips = up to 3 concrete articulation tips in Russian for the weakest sounds, each naming the sound and a practice word.
-- next: the next lesson is on "${TOPICS[nextTopic].t}". focus = 1-2 sentences in Russian on what it will train and why; phrases = exactly 3 English phrases with Russian glosses that fix today's weak spots and fit the next topic; drill = up to 3 short items the coach should make the learner practise (may include a pronunciation item).`;
+- next: the next lesson is on "${TOPICS[nextTopic].t}". focus = 1-2 sentences in Russian on what it will train and why; phrases = exactly 3 English phrases with Russian glosses that fix today's weak spots and fit the next topic; drill = up to 3 short items the coach should make the learner practise.`;
   try {
     const stream = client.beta.messages.stream({
       model: db.settings.model, max_tokens: 16000, betas: BETAS, fallbacks: "default",
@@ -571,7 +435,7 @@ function applyReport(s, r, nextTopic) {
   save("next");
 }
 
-/* ================= pronunciation drill ================= */
+/* ================= read-aloud drill ================= */
 let D = null;
 function drillItems(s) {
   const items = [];
@@ -579,65 +443,52 @@ function drillItems(s) {
   if (s) {
     (s.report && s.report.mistakes || []).forEach(m => add(m.better));
     s.phrases.forEach(p => add(p[0]));
-    (s.pron && s.pron.badWords || []).slice(0, 6).forEach(w => add(w.w));
   }
-  for (const w of weakSounds(db.profile.phonemes)) w.ex.slice(0, 2).forEach(add);
+  unclearWords(4).forEach(x => add(x.w));
   if (!items.length) ["I think this is a really good idea.", "Three things matter the most.", "What would you do with the whole world?", "The weather was worse than we thought."].forEach(add);
   return items.slice(0, 12);
 }
 function drillView(s) {
-  if (!hasAzure()) { toast("Для оценки произношения нужен ключ Azure Speech: добавьте его в настройках."); setupUI(); return; }
+  if (micBlocked) { toast("Для тренировки нужен микрофон. Разрешите его в настройках браузера."); return; }
   if (canSpeak) { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; speechSynthesis.speak(u); }
   D = { items: drillItems(s), results: {}, busy: -1, from: s ? s.n : null };
   show("drill"); drillUI();
 }
 function drillUI() {
-  const colorOf = a => a == null ? "" : a >= 80 ? "good" : a >= 60 ? "mid" : "bad";
   fill($("#drillBody"),
-    el("span", { class: "label" }, D.from ? `Произношение · по уроку ${D.from}` : "Произношение"),
+    el("span", { class: "label" }, D.from ? `Фразы вслух · по уроку ${D.from}` : "Фразы вслух"),
     el("h2", {}, "Послушайте и повторите"),
-    el("p", { class: "note" }, "Нажмите ▶, чтобы услышать образец, затем ● и произнесите фразу. Красным отмечены слова и звуки, которые прозвучали неточно."),
+    el("p", { class: "note" }, "Нажмите ▶, чтобы услышать образец, затем ● и произнесите фразу. Красным отмечены слова, которые распознавание не разобрало: обычно это слова, произнесённые неразборчиво. Это проверка разборчивости, отдельные звуки она не оценивает."),
     el("ul", { class: "drill" }, D.items.map((t, i) => {
       const r = D.results[i];
       return el("li", {},
         el("div", { class: "row" },
           el("button", { class: "tool", "aria-label": "Послушать образец", onclick: () => { stopSpeaking(); speakQueue(t); } }, "▶"),
-          el("button", { class: "tool rec" + (D.busy === i ? " on" : ""), "aria-label": "Записать", disabled: D.busy >= 0 && D.busy !== i, onclick: () => drillRecord(i) }, D.busy === i ? "Слушаю…" : "● Сказать"),
-          r && !r.error ? el("span", { class: "sc" }, `${Math.round(r.pron)}/100`) : null),
-        el("p", { class: "dtext" }, r && r.words && r.words.length
-          ? r.words.map(w => el("span", { class: "w " + colorOf(w.err === "Omission" ? 0 : w.acc), title: w.acc != null ? `${Math.round(w.acc)}/100` : "" }, w.w + " "))
-          : t),
-        r && r.error ? el("p", { class: "note err" }, r.error) : null,
-        r && r.words ? el("div", { class: "phon" }, r.words.filter(w => w.acc != null && w.acc < 70).slice(0, 4).map(w => {
-          const bad = w.ph.filter(p => p.acc != null && p.acc < 60);
-          return el("div", {}, el("b", {}, w.w), " ",
-            bad.length ? bad.map(p => `/${p.p}/${p.heard ? " → похоже на /" + p.heard + "/" : ""}`).join(", ") : "неточно",
-            bad.map(p => SOUND_TIPS[p.p]).filter(Boolean).slice(0, 1).map(tip => el("small", {}, tip)));
-        })) : null,
-        r && !r.error ? el("p", { class: "note" }, `Точность ${Math.round(r.acc)} · беглость ${Math.round(r.flu)}${r.pros != null ? ` · интонация ${Math.round(r.pros)}` : ""}${r.comp != null ? ` · полнота ${Math.round(r.comp)}` : ""}`) : null
-      );
+          el("button", { class: "tool rec" + (D.busy === i ? " on" : ""), "aria-label": "Сказать", disabled: D.busy >= 0 && D.busy !== i, onclick: () => drillRecord(i) }, D.busy === i ? "Слушаю… нажмите, когда закончите" : "● Сказать"),
+          r && r.diff ? el("span", { class: "sc" }, `${r.score}%`) : null),
+        el("p", { class: "dtext" }, r && r.diff ? r.diff.map(x => el("span", { class: "w " + (x.ok ? "good" : "bad") }, x.w + " ")) : t),
+        r && r.heard ? el("p", { class: "note" }, `Распознано: «${r.heard}»`) : null,
+        r && r.error ? el("p", { class: "note err" }, r.error) : null);
     })),
     el("div", { class: "row" }, el("button", { class: "btn primary", onclick: homeUI }, "На главную"))
   );
 }
 function drillRecord(i) {
+  if (D.busy === i) { finishInput(); return; }
   if (D.busy >= 0) return;
   stopSpeaking();
-  D.busy = i; drillUI(); setLive();
-  let r;
-  try { r = azRecognizer(D.items[i]); } catch { D.busy = -1; D.results[i] = { error: "Не удалось запустить распознавание" }; drillUI(); return; }
-  input.active = true; setLive();
-  r.recognizeOnceAsync(res => {
-    input.active = false; setLive(); try { r.close(); } catch {}
-    if (res.reason === SDK.ResultReason.RecognizedSpeech) {
-      const p = parsePron(res);
-      D.results[i] = p || { error: "Не удалось оценить. Попробуйте ещё раз." };
-      if (p) { const sm = summarizePron([p]); if (sm) mergePhonemes(sm.phonemes); }
-    } else if (res.reason === SDK.ResultReason.Canceled) {
-      D.results[i] = { error: azError(SDK.CancellationDetails.fromResult(res)) };
-    } else D.results[i] = { error: "Ничего не услышал. Нажмите «Сказать» и говорите сразу." };
-    D.busy = -1; drillUI();
-  }, err => { input.active = false; setLive(); try { r.close(); } catch {} D.busy = -1; D.results[i] = { error: "Нет доступа к микрофону: " + err }; drillUI(); });
+  D.busy = i; drillUI();
+  const ok = startInput(() => {}, text => {
+    D.busy = -1;
+    if (!text) D.results[i] = { error: "Ничего не услышал. Нажмите «Сказать» и говорите сразу." };
+    else {
+      const diff = wordDiff(D.items[i], text);
+      recordUnclear(diff);
+      D.results[i] = { diff, heard: text, score: Math.round(100 * diff.filter(x => x.ok).length / diff.length) };
+    }
+    drillUI();
+  });
+  if (!ok) { D.busy = -1; D.results[i] = { error: "Микрофон недоступен." }; drillUI(); }
 }
 
 /* ================= UI: lesson ================= */
@@ -665,10 +516,6 @@ function lessonUI() {
   b.setAttribute("aria-label", { listening: "Отправить сейчас", speaking: "Перебить и ответить", confirm: "Сказать заново", error: "Повторить" }[L.state] || "Говорить");
   const d = $("#draft"); d.hidden = !(L.state === "listening" || L.state === "confirm"); d.textContent = L.draft || "Говорите…";
   $("#doneBtn").hidden = L.state !== "listening";
-  const lp = $("#lastPron");
-  lp.hidden = !(L.lastPron && L.state !== "listening" && L.state !== "confirm");
-  if (L.lastPron) fill(lp, el("span", { class: "label" }, `Произношение ответа · ${L.lastPron.pron}/100`),
-    L.lastPron.badWords.length ? el("span", {}, "Неточно: ", L.lastPron.badWords.slice(0, 5).map(w => el("b", { class: "bw" }, w.w))) : el("span", {}, "Все слова прозвучали чисто"));
   $("#chips").replaceChildren(...L.plan.phrases.map(([en, ru]) => el("button", { class: "chip", title: ru, onclick: () => { stopInput(); stopSpeaking(); speakQueue(en); if (L) { L.state = "speaking"; lessonUI(); whenSpoken(() => listen()); } } }, en)));
 }
 function micPressed() {
@@ -703,35 +550,33 @@ const stat = (v, l) => el("div", { class: "stat" }, el("b", {}, String(v)), el("
 function homeUI() {
   if (!client) { setupUI(); return; }
   show("home");
-  const ss = db.sessions, withRep = ss.filter(s => s.report), withPron = ss.filter(s => s.pron);
+  const ss = db.sessions, withRep = ss.filter(s => s.report);
   const plan = buildPlan(topicIndex());
   const sel = el("select", { id: "topicSel", "aria-label": "Тема урока" }, TOPICS.map((t, i) => el("option", { value: i, selected: i === plan.topic }, t.ru)));
   const errs = db.profile.errors.slice().sort((a, b) => (a.status === "fixed") - (b.status === "fixed") || b.count - a.count).slice(0, 8);
-  const sounds = weakSounds(db.profile.phonemes);
+  const unclear = unclearWords();
   fill($("#homeBody"),
     el("section", { class: "stats" },
       stat(ss.length, "уроков"), stat(Math.round(ss.reduce((a, s) => a + s.speakSec, 0) / 60), "минут речи"),
-      stat(streak(), "дней подряд"), stat(withPron.length ? withPron.at(-1).pron.pron : "–", "произношение")),
-    !hasAzure() ? el("section", { class: "card warn" }, el("p", {}, "Произношение не оценивается: не задан ключ Azure Speech. Распознавание идёт через браузер."),
-      el("button", { class: "btn", onclick: setupUI }, "Добавить ключ Azure")) : null,
+      stat(streak(), "дней подряд"), stat(ss.length ? ss.at(-1).avgWords : "–", "слов в ответе")),
+    micBlocked ? el("section", { class: "card warn" }, el("p", {}, SR
+      ? "Нет доступа к микрофону. Разрешите его: Настройки → Safari → Микрофон, затем перезагрузите страницу."
+      : "Этот браузер не распознаёт речь. На iPhone откройте страницу в Safari, на компьютере — в Chrome.")) : null,
     el("section", { class: "card next" },
       el("span", { class: "label" }, `Урок ${plan.n}`),
       el("h2", {}, plan.title),
-      plan.focus ? el("p", { class: "focus" }, plan.focus) : el("p", { class: "note" }, "20 минут голосом: разминка, фразы урока, разговор, ролевая ситуация, работа над ошибками. В конце разбор речи и произношения."),
+      plan.focus ? el("p", { class: "focus" }, plan.focus) : el("p", { class: "note" }, "20 минут голосом: разминка, фразы урока, разговор, ролевая ситуация, работа над ошибками. В конце разбор."),
       el("div", { class: "phr" }, plan.phrases.map(([en, ru]) => el("div", {}, el("b", {}, en), el("span", {}, ru)))),
       plan.drill.length ? el("p", { class: "note" }, "Будем отрабатывать: " + plan.drill.join("; ")) : null,
       el("div", { class: "row" },
         el("button", { class: "btn primary big", onclick: () => startLesson(+sel.value) }, "▶ Начать урок"),
         el("label", { class: "row small" }, "Тема: ", sel))),
     el("section", { class: "card" },
-      el("h3", {}, "Произношение"),
-      withPron.length > 1 ? el("div", {}, el("span", { class: "label" }, "Общая оценка, 0–100"), spark(withPron.map(s => s.pron.pron), 100, "Произношение по урокам")) : null,
-      sounds.length ? el("ul", { class: "sounds" }, sounds.map(x => el("li", {},
-        el("span", { class: "ipa" }, `/${x.p}/`),
-        el("span", {}, el("b", {}, `${x.rate}% неточно`), x.heard ? ` · звучит как /${x.heard}/` : "", x.ex.length ? ` · ${x.ex.slice(0, 3).join(", ")}` : "",
-          SOUND_TIPS[x.p] ? el("small", {}, SOUND_TIPS[x.p]) : null))))
-        : el("p", { class: "note" }, hasAzure() ? "После первого урока здесь появятся звуки, которые получаются хуже всего." : "Нужен ключ Azure Speech."),
-      hasAzure() ? el("div", { class: "row" }, el("button", { class: "btn", onclick: () => drillView(ss.at(-1)) }, "Тренировать произношение")) : null),
+      el("h3", {}, "Фразы вслух"),
+      el("p", { class: "note" }, "Повторяйте за Алексом фразы и исправленные ошибки урока. Слова, которые распознавание не разобрало, отмечаются красным и копятся здесь."),
+      unclear.length ? el("div", {}, el("span", { class: "label" }, "Чаще всего не распознаются"),
+        el("p", {}, unclear.map(x => el("b", { class: "bw", title: `не распознано ${x.miss} из ${x.t}` }, x.w)))) : null,
+      el("div", { class: "row" }, el("button", { class: "btn", onclick: () => drillView(ss.at(-1)) }, "Тренировать фразы вслух"))),
     el("section", { class: "card" },
       el("h3", {}, "Речь"),
       el("div", { class: "two" },
@@ -749,7 +594,7 @@ function homeUI() {
       el("ul", { class: "hist" }, ss.slice().reverse().slice(0, 20).map(s => el("li", {},
         el("button", { class: "linkish", onclick: () => reportView(s) },
           el("span", { class: "hn" }, `#${s.n}`),
-          el("span", { class: "ht" }, s.title, el("small", {}, `${new Date(s.date).toLocaleDateString("ru-RU")} · ${Math.round(s.durationSec / 60)} мин · ${s.avgWords} слов/ответ${s.pron ? ` · произн. ${s.pron.pron}` : ""}`)),
+          el("span", { class: "ht" }, s.title, el("small", {}, `${new Date(s.date).toLocaleDateString("ru-RU")} · ${Math.round(s.durationSec / 60)} мин · ${s.avgWords} слов/ответ`)),
           el("span", { class: "hs" }, s.report ? `${s.report.scores.fluency}/5` : "—")))))) : null
   );
   settingsUI();
@@ -765,7 +610,7 @@ function reportView(s, error, pending) {
   fill($("#reportBody"),
     el("span", { class: "label" }, `Урок ${s.n} · ${new Date(s.date).toLocaleDateString("ru-RU")}`),
     el("h2", {}, s.title),
-    el("section", { class: "stats" }, stat(Math.round(s.durationSec / 60), "минут"), stat(s.answers, "ответов"), stat(s.avgWords, "слов в ответе"), stat(s.pron ? s.pron.pron : "–", "произношение")),
+    el("section", { class: "stats" }, stat(Math.round(s.durationSec / 60), "минут"), stat(s.answers, "ответов"), stat(s.avgWords, "слов в ответе"), stat(s.longest, "самый длинный")),
     pending && !r ? el("div", { class: "card" }, el("p", {}, "Claude разбирает урок. Обычно это 20–60 секунд.")) : null,
     error ? el("div", { class: "card err" }, el("p", {}, error),
       !r && s.answers >= 3 && client ? el("button", { class: "btn", onclick: () => { reportView(s, null, true); makeReport(s); } }, "Запросить разбор ещё раз") : null) : null,
@@ -773,12 +618,7 @@ function reportView(s, error, pending) {
     r ? list("Что получилось", r.wins) : null,
     r && r.mistakes.length ? el("div", { class: "sec" }, el("h3", {}, "Главные ошибки"),
       el("ul", { class: "mist" }, r.mistakes.map(m => el("li", {}, el("s", {}, m.said), el("b", {}, m.better), el("small", {}, m.why))))) : null,
-    s.pron ? el("div", { class: "card" }, el("h3", {}, "Произношение"),
-      el("p", { class: "note" }, `Общая ${s.pron.pron} · точность ${s.pron.acc} · беглость ${s.pron.flu} · интонация ${s.pron.pros} (из 100)`),
-      r && r.pronunciation ? el("p", {}, r.pronunciation.summary) : null,
-      r && r.pronunciation && r.pronunciation.tips.length ? el("ul", {}, r.pronunciation.tips.map(t => el("li", {}, t))) : null,
-      s.pron.badWords.length ? el("p", {}, "Слова: ", s.pron.badWords.slice(0, 8).map(w => el("b", { class: "bw" }, w.w))) : null,
-      hasAzure() ? el("div", { class: "row" }, el("button", { class: "btn primary", onclick: () => drillView(s) }, "Отработать произношение")) : null) : null,
+    r ? el("div", { class: "row" }, el("button", { class: "btn primary", onclick: () => drillView(s) }, "Повторить фразы урока вслух")) : null,
     r ? el("div", { class: "card next" }, el("h3", {}, "Следующий урок"), el("p", {}, r.next.focus),
       el("div", { class: "phr" }, r.next.phrases.map(p => el("div", {}, el("b", {}, p.en), el("span", {}, p.ru))))) : null,
     el("div", { class: "row" }, el("button", { class: "btn", onclick: homeUI }, "На главную"))
@@ -804,13 +644,13 @@ function settingsUI() {
     el("p", { class: "note" }, "На iPhone качественные голоса скачиваются в Настройки → Универсальный доступ → Устный контент → Голоса → English."),
     el("label", { class: "row small" }, el("input", { type: "checkbox", id: "autoMic", checked: st.autoMic, onchange: e => { st.autoMic = e.target.checked; save("settings"); } }), "Включать микрофон сам после ответа Алекса"),
     el("div", { class: "row" },
-      el("button", { class: "btn", onclick: setupUI }, "Ключи"),
+      el("button", { class: "btn", onclick: setupUI }, "Ключ Claude"),
       el("button", { class: "btn", onclick: exportData }, "Скачать резервную копию"),
       el("label", { class: "btn" }, "Загрузить копию", el("input", { type: "file", accept: "application/json", hidden: true, onchange: importData })))
   );
 }
 function exportData() {
-  const blob = new Blob([JSON.stringify({ v: 2, profile: db.profile, sessions: db.sessions, next: db.next, settings: db.settings }, null, 2)], { type: "application/json" });
+  const blob = new Blob([JSON.stringify({ v: 3, profile: db.profile, sessions: db.sessions, next: db.next, settings: db.settings }, null, 2)], { type: "application/json" });
   const a = el("a", { href: URL.createObjectURL(blob), download: `english-coach-${dayKey(Date.now())}.json` }); document.body.append(a); a.click(); a.remove();
 }
 async function importData(e) {
@@ -818,7 +658,7 @@ async function importData(e) {
   try {
     const d = JSON.parse(await f.text());
     if (!Array.isArray(d.sessions) || !d.profile) throw new Error();
-    db.profile = { phonemes: {}, ...d.profile }; db.sessions = d.sessions; db.next = d.next || null;
+    db.profile = { unclear: {}, ...d.profile }; db.sessions = d.sessions; db.next = d.next || null;
     if (d.settings) db.settings = { ...db.settings, ...d.settings };
     ["profile", "sessions", "next", "settings"].forEach(save);
     toast("Копия загружена"); homeUI();
@@ -827,43 +667,26 @@ async function importData(e) {
 function setupUI() {
   show("setup");
   $("#keyInput").value = db.keys.claude;
-  $("#azKey").value = db.keys.azure;
-  $("#azRegion").value = db.keys.region;
-  $("#noSDK").hidden = !!SDK;
+  $("#noSR").hidden = !!SR;
 }
 $("#saveKey").addEventListener("click", async () => {
-  const k = $("#keyInput").value.trim(), ak = $("#azKey").value.trim(), reg = $("#azRegion").value.trim().toLowerCase().replace(/\s+/g, "");
+  const k = $("#keyInput").value.trim();
   if (!k) { toast("Вставьте ключ Claude"); return; }
-  if (ak && !reg) { toast("Укажите регион ресурса Azure, например westeurope"); return; }
-  const b = $("#saveKey"); b.disabled = true; b.textContent = "Проверяю ключ Claude…";
+  const b = $("#saveKey"); b.disabled = true; b.textContent = "Проверяю ключ…";
   try {
     const c = new Anthropic({ apiKey: k, dangerouslyAllowBrowser: true });
     await c.models.retrieve(db.settings.model);
-    db.keys = { claude: k, azure: ak, region: reg }; save("keys"); makeClient();
-    toast(ak ? "Ключи сохранены. Проверьте микрофон и Azure кнопкой ниже." : "Ключ Claude работает");
-    if (!ak) homeUI();
+    db.keys = { claude: k }; save("keys"); makeClient();
+    toast("Ключ работает"); homeUI();
   } catch (e) { toast(apiError(e)); }
-  b.disabled = false; b.textContent = "Сохранить";
+  b.disabled = false; b.textContent = "Сохранить и продолжить";
 });
 $("#micTest").addEventListener("click", () => {
   const out = $("#micOut"); out.hidden = false;
-  const ak = $("#azKey").value.trim(), reg = $("#azRegion").value.trim().toLowerCase();
-  if (SDK && ak && reg) {
-    out.textContent = "Скажите по-английски: «I think this is a great idea»";
-    const saved = db.keys; db.keys = { ...db.keys, azure: ak, region: reg };
-    let r; try { r = azRecognizer("I think this is a great idea"); } catch { out.textContent = "Не удалось запустить Azure."; db.keys = saved; return; }
-    db.keys = saved;
-    r.recognizeOnceAsync(res => {
-      try { r.close(); } catch {}
-      if (res.reason === SDK.ResultReason.RecognizedSpeech) { const p = parsePron(res); out.textContent = p ? `Работает. Услышал: «${p.text}». Произношение ${Math.round(p.pron)}/100, точность ${Math.round(p.acc)}.` : `Услышал: «${res.text}»`; }
-      else if (res.reason === SDK.ResultReason.Canceled) out.textContent = azError(SDK.CancellationDetails.fromResult(res));
-      else out.textContent = "Ничего не услышал. Нажмите ещё раз и говорите сразу.";
-    }, err => { try { r.close(); } catch {} out.textContent = "Нет доступа к микрофону: " + err; });
-  } else if (SR) {
-    out.textContent = "Скажите что-нибудь по-английски…";
-    const ok = startInput(t => out.textContent = t, t => out.textContent = t ? `Браузер распознал: «${t}». Без ключа Azure произношение не оценивается.` : "Ничего не услышал.");
-    if (!ok) out.textContent = "Распознавание речи недоступно в этом браузере.";
-  } else out.textContent = "Этот браузер не распознаёт речь. Добавьте ключ Azure или откройте страницу в Safari или Chrome.";
+  if (micBlocked) { out.textContent = SR ? "Нет доступа к микрофону. Разрешите его в настройках браузера." : "Этот браузер не распознаёт речь. Откройте страницу в Safari (iPhone) или Chrome."; return; }
+  out.textContent = "Скажите что-нибудь по-английски…";
+  const ok = startInput(t => out.textContent = t, t => out.textContent = t ? `Работает. Распознано: «${t}».` : "Ничего не услышал. Нажмите ещё раз и говорите сразу.");
+  if (!ok) out.textContent = "Не удалось включить микрофон.";
 });
 
 /* ================= wiring ================= */
@@ -878,7 +701,7 @@ $("#endBtn").addEventListener("click", endLesson);
 $("#typeForm").addEventListener("submit", e => {
   e.preventDefault();
   const t = $("#typeInput").value.trim(); if (!t || !L || L.state === "thinking") return;
-  $("#typeInput").value = ""; stopInput(); stopSpeaking(); clearTimeout(L.sendTimer); userSays(t, 0, null);
+  $("#typeInput").value = ""; stopInput(); stopSpeaking(); clearTimeout(L.sendTimer); userSays(t, 0);
 });
 $("#homeLink").addEventListener("click", () => { if (L && !L.finished) { toast("Сначала завершите урок кнопкой «Закончить»"); return; } homeUI(); });
 if (canSpeak) speechSynthesis.onvoiceschanged = () => { if (!$("#home").hidden) settingsUI(); };

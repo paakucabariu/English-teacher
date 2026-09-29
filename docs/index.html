@@ -136,7 +136,6 @@ details.settings summary{cursor:pointer;font-weight:700}
 @keyframes pulse{50%{box-shadow:0 0 0 18px var(--accent-soft)}}
 #state{font-size:14px;color:var(--muted);text-align:center;min-height:21px}
 #draft{font-size:17px;text-align:center;max-width:34ch;min-height:26px}
-#lastPron{display:grid;gap:4px;font-size:14px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
 .lfoot{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
 #typeForm{display:flex;gap:8px}
 #typeForm input{flex:1;min-width:0}
@@ -178,10 +177,10 @@ details.settings summary{cursor:pointer;font-weight:700}
   </header>
 
   <section id="setup" class="card" hidden>
-    <h2>Ключи</h2>
-    <p>Ключи хранятся только на этом устройстве и отправляются только в Anthropic и Microsoft.</p>
+    <h2>Ключ Claude</h2>
+    <p>Ключ хранится только на этом устройстве и отправляется только в Anthropic.</p>
     <div class="sec">
-      <h3>1. Claude — ведёт урок и делает разбор</h3>
+      <h3>Claude ведёт урок и делает разбор</h3>
       <ol class="steps">
         <li><a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com → API keys</a> → Create key.</li>
         <li>В Billing пополните баланс (хватит $5 для старта).</li>
@@ -190,23 +189,9 @@ details.settings summary{cursor:pointer;font-weight:700}
         <input type="password" id="keyInput" autocomplete="off" placeholder="sk-ant-...">
       </label>
     </div>
-    <div class="sec">
-      <h3>2. Azure Speech — слушает и оценивает произношение</h3>
-      <ol class="steps">
-        <li><a href="https://portal.azure.com/#create/Microsoft.CognitiveServicesSpeechServices" target="_blank" rel="noopener">portal.azure.com → создать ресурс Speech</a>, тариф Free F0.</li>
-        <li>Откройте ресурс → «Keys and Endpoint»: скопируйте KEY 1 и Location/Region.</li>
-      </ol>
-      <label class="field" for="azKey">Ключ Azure (KEY 1)
-        <input type="password" id="azKey" autocomplete="off" placeholder="32 символа">
-      </label>
-      <label class="field" for="azRegion">Регион
-        <input type="text" id="azRegion" autocomplete="off" list="regions" placeholder="например, westeurope">
-      </label>
-      <datalist id="regions"><option value="westeurope"><option value="northeurope"><option value="eastus"><option value="westus2"><option value="uksouth"><option value="swedencentral"><option value="germanywestcentral"><option value="francecentral"></datalist>
-      <p class="note" id="noSDK" hidden>Библиотека Azure не загрузилась. Обновите страницу.</p>
-    </div>
+    <p class="note" id="noSR" hidden>Этот браузер не распознаёт речь. На iPhone откройте страницу в Safari, на компьютере — в Chrome.</p>
     <div class="row">
-      <button class="btn primary" id="saveKey">Сохранить</button>
+      <button class="btn primary" id="saveKey">Сохранить и продолжить</button>
       <button class="btn" id="micTest">Проверить микрофон</button>
       <button class="btn" onclick="document.getElementById('homeLink').click()">На главную</button>
     </div>
@@ -243,7 +228,6 @@ details.settings summary{cursor:pointer;font-weight:700}
       <p id="draft" hidden></p>
       <button class="btn" id="doneBtn" hidden>Готово, отправить</button>
     </div>
-    <div id="lastPron" hidden></div>
     <div>
       <span class="label">Фразы урока · нажмите, чтобы послушать</span>
       <div class="chips" id="chips"></div>
@@ -262,7 +246,6 @@ details.settings summary{cursor:pointer;font-weight:700}
   <section id="drill" class="stack" hidden><div class="stack" id="drillBody"></div></section>
 </div>
 <div id="toast" role="status" hidden></div>
-<script src="vendor/speech-sdk.min.js"></script>
 <script type="module" src="app.js"></script>
 </body>
 </html>

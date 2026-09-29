@@ -1,7 +1,7 @@
 {
   "name": "On Air English",
   "short_name": "On Air",
-  "description": "Разговорные уроки английского с Claude и оценкой произношения",
+  "description": "Разговорные уроки английского с Claude",
   "lang": "ru",
   "start_url": "./",
   "scope": "./",
