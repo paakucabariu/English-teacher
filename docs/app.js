@@ -58,6 +58,7 @@ async function keepAwake(on) {
   } catch { wakeLock = null; }
 }
 document.addEventListener("visibilitychange", () => {
+  mlog("page-" + document.visibilityState);
   if (!L || L.finished) return;
   if (document.visibilityState === "visible") { keepAwake(true); return; }
   // the app went to the background: iOS takes the microphone away, so stop cleanly and keep the lesson
@@ -86,7 +87,8 @@ function pump() {
   const v = pickVoice(); if (v) u.voice = v;
   u.lang = v ? v.lang : "en-US"; u.rate = db.settings.rate * tts.rateMul;
   tts.speaking = true; setLive();
-  u.onend = u.onerror = () => { tts.speaking = false; setLive(); pump(); };
+  if (typeof mlog === "function") mlog("tts-start");
+  u.onend = u.onerror = e => { if (typeof mlog === "function") mlog("tts-" + (e && e.type)); tts.speaking = false; setLive(); pump(); };
   speechSynthesis.speak(u);
 }
 function stopSpeaking() { tts.q = []; tts.onIdle = null; if (canSpeak) speechSynthesis.cancel(); tts.speaking = false; setLive(); }
@@ -97,71 +99,103 @@ function setLive() { $("#lamp").classList.toggle("live", tts.speaking || input.a
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 // Android Chrome repeats results in continuous mode, so there each phrase is its own recognition session.
 const CONTINUOUS = !/Android/i.test(navigator.userAgent);
-const input = { active: false, started: false, rec: null, base: "", fin: "", interim: "", lastChange: 0, firstAt: 0, timer: null, watchdog: null, opts: {}, restarts: 0 };
+const input = { active: false, started: false, base: "", fin: "", interim: "", lastChange: 0, firstAt: 0, timer: null, watchdog: null, opts: {}, restarts: 0, pendingStart: false };
 // Only a browser without speech recognition is "blocked". Microphone errors are never permanent:
-// iOS reports not-allowed / audio-capture transiently (e.g. when it cuts a session short), and the next tap usually works.
+// iOS reports not-allowed / audio-capture transiently, and the next tap (or a page reload) usually works.
 const micBlocked = !SR;
 const canListen = () => !micBlocked;
 let micFailures = 0;
+
+/* A short log of what the microphone did, so a failure on the phone can be reported with the real error code. */
+const micLog = [];
+function mlog(ev, detail) {
+  micLog.push(`${new Date().toISOString().slice(11, 23)} ${ev}${detail ? " " + detail : ""}`);
+  if (micLog.length > 80) micLog.shift();
+}
+
+/* One recognizer for the whole visit (iOS copes badly with many instances); a fresh one only after an error. */
+let recog = null, recRunning = false, lastMicError = "";
+function recognizer() {
+  if (recog) return recog;
+  const r = new SR();
+  r.lang = "en-US"; r.continuous = CONTINUOUS; r.interimResults = true; r.maxAlternatives = 1;
+  const started = what => () => {
+    if (what === "start") recRunning = true;
+    mlog(what);
+    if (input.active && !input.started) { input.started = true; micFailures = 0; clearTimeout(input.watchdog); input.opts.onStart && input.opts.onStart(); }
+  };
+  r.onstart = started("start");
+  r.onaudiostart = started("audiostart");
+  r.onresult = ev => {
+    if (r !== recog || !input.active) return;
+    let fin = "", inter = "";
+    for (let i = 0; i < ev.results.length; i++) { const x = ev.results[i]; if (x.isFinal) fin += x[0].transcript + " "; else inter += x[0].transcript; }
+    input.fin = fin.trim(); input.interim = inter;
+    if (!input.firstAt) input.firstAt = Date.now();
+    input.lastChange = Date.now(); input.opts.onUpdate && input.opts.onUpdate(inputText());
+  };
+  r.onerror = ev => {
+    mlog("error", ev.error + (ev.message ? ` (${ev.message})` : ""));
+    if (r !== recog) return;
+    lastMicError = ev.error;
+    if (!input.active) return;
+    if (ev.error === "not-allowed" || ev.error === "service-not-allowed")
+      interrupted(input.restarts ? "Запись прервалась." : "iPhone не дал доступ к микрофону.", ev.error);
+    else if (ev.error === "audio-capture")
+      interrupted("Микрофон занят: звонок, другое приложение или ещё играет звук.", ev.error);
+    // no-speech, aborted, network: the session ends and onend decides what to do
+  };
+  r.onend = () => {
+    mlog("end");
+    if (r !== recog) return;
+    recRunning = false;
+    input.base = [input.base, input.fin].join(" ").trim(); input.fin = ""; input.interim = "";
+    if (!input.active) return;
+    if (input.pendingStart) { input.pendingStart = false; tryStart(); return; }
+    // the browser ended the session on its own (a pause, a time limit): start again, a few times at most
+    if (input.restarts >= 5) { interrupted("Запись остановилась.", "ended"); return; }
+    input.restarts++;
+    setTimeout(() => { if (input.active) tryStart(); }, 80);
+  };
+  recog = r;
+  return r;
+}
+function tryStart() {
+  let r;
+  try { r = recognizer(); } catch (e) { mlog("create-failed", e && e.name); interrupted("Распознавание речи не запустилось.", e && e.name); return; }
+  try { mlog("start()"); r.start(); }
+  catch (e) {
+    mlog("start-failed", `${e && e.name}: ${e && e.message}`);
+    // still finishing the previous recording: start as soon as it has ended
+    if (e && e.name === "InvalidStateError" && recRunning) { input.pendingStart = true; try { r.abort(); } catch {} return; }
+    interrupted("Микрофон не включился.", e && e.name);
+  }
+}
 function inputText() { return [input.base, input.fin, input.interim].join(" ").replace(/\s+/g, " ").trim(); }
 /* The recording stopped by itself. Keep what was said instead of losing it. */
-function interrupted(msg) {
+function interrupted(msg, code) {
   if (!input.active) return;
   if (inputText()) { finishInput(); return; }
   micFailures++;
+  mlog("failed", code || "");
+  store.set("miclog", micLog.slice(-80)); // survives the reload that «Перезапустить микрофон» does
+  recog = null; recRunning = false; // next tap gets a brand-new recognizer
   const fail = input.opts.onFail;
   stopInput();
-  fail && fail(micFailures >= 3
-    ? msg + " Если повторяется: Настройки iPhone → Safari → Микрофон → «Разрешить», затем закройте и откройте приложение."
-    : msg);
+  fail && fail(`${msg} Нажмите на микрофон ещё раз.${code ? ` (код: ${code})` : ""}`, true);
 }
-/* opts: onUpdate(text), onDone(text, ms), onStart() once the microphone is really on, onFail(msg), auto: send after a pause */
+/* opts: onUpdate(text), onDone(text, ms), onStart() once the microphone is really on, onFail(msg, isMic), auto: send after a pause */
 function startInput(opts) {
   if (micBlocked) return false;
   stopInput();
   if (canSpeak && (tts.speaking || speechSynthesis.speaking)) stopSpeaking(); // iOS cannot record while it is speaking
-  Object.assign(input, { active: true, started: false, base: "", fin: "", interim: "", lastChange: Date.now(), firstAt: 0, opts, restarts: 0 });
-  const run = () => {
-    if (!input.active) return;
-    let rec;
-    try { rec = new SR(); } catch { interrupted("Распознавание речи не запустилось. Нажмите на микрофон ещё раз."); return; }
-    rec.lang = "en-US"; rec.continuous = CONTINUOUS; rec.interimResults = true; rec.maxAlternatives = 1;
-    const started = () => { if (!input.started && input.active) { input.started = true; micFailures = 0; clearTimeout(input.watchdog); input.opts.onStart && input.opts.onStart(); } };
-    rec.onstart = started; rec.onaudiostart = started;
-    rec.onresult = ev => {
-      if (rec !== input.rec) return;
-      let fin = "", inter = "";
-      for (let i = 0; i < ev.results.length; i++) { const r = ev.results[i]; if (r.isFinal) fin += r[0].transcript + " "; else inter += r[0].transcript; }
-      input.fin = fin.trim(); input.interim = inter;
-      if (!input.firstAt) input.firstAt = Date.now();
-      input.lastChange = Date.now(); input.opts.onUpdate && input.opts.onUpdate(inputText());
-    };
-    rec.onerror = ev => {
-      if (rec !== input.rec) return;
-      if (ev.error === "not-allowed" || ev.error === "service-not-allowed")
-        interrupted(input.restarts ? "Запись прервалась." : "Нет доступа к микрофону. Нажмите на микрофон ещё раз и, если телефон спросит, разрешите доступ.");
-      else if (ev.error === "audio-capture")
-        interrupted("Микрофон занят (звонок или другое приложение). Нажмите на микрофон ещё раз.");
-      // no-speech, aborted, network: the session ends and onend decides what to do
-    };
-    rec.onend = () => {
-      if (rec !== input.rec) return;
-      input.base = [input.base, input.fin].join(" ").trim(); input.fin = ""; input.interim = "";
-      if (!input.active) return;
-      // the browser ended the session on its own (a pause, a time limit): start a new one, at most a few times
-      if (input.restarts >= 5) { interrupted("Запись остановилась. Нажмите на микрофон ещё раз."); return; }
-      input.restarts++;
-      setTimeout(run, 80);
-    };
-    input.rec = rec;
-    try { rec.start(); }
-    catch { interrupted("Микрофон не включился. Нажмите на него ещё раз."); }
-  };
-  run();
+  Object.assign(input, { active: true, started: false, base: "", fin: "", interim: "", lastChange: Date.now(), firstAt: 0, opts, restarts: 0, pendingStart: false });
+  if (recRunning) { mlog("wait-previous"); input.pendingStart = true; try { recog.abort(); } catch {} }
+  else tryStart();
   if (!input.active) return false;
   // if the browser never reports that recording started, say so instead of pretending to listen
   clearTimeout(input.watchdog);
-  input.watchdog = setTimeout(() => { if (input.active && !input.started) interrupted("Микрофон не включился. Нажмите на кнопку ещё раз."); }, 3000);
+  input.watchdog = setTimeout(() => { if (input.active && !input.started) interrupted("Микрофон не включился.", lastMicError || "timeout"); }, 3000);
   clearInterval(input.timer);
   input.timer = setInterval(() => { if (input.active && input.opts.auto && inputText() && Date.now() - input.lastChange > db.settings.silence) finishInput(); }, 200);
   setLive();
@@ -173,10 +207,16 @@ function finishInput() {
   stopInput(); done && done(text, ms);
 }
 function stopInput() {
-  input.active = false; clearInterval(input.timer); clearTimeout(input.watchdog);
-  const rec = input.rec; input.rec = null;
-  try { rec && rec.abort(); } catch {}
+  const wasActive = input.active;
+  input.active = false; input.pendingStart = false; clearInterval(input.timer); clearTimeout(input.watchdog);
+  if (wasActive && recog && recRunning) { try { recog.abort(); } catch {} }
   setLive();
+}
+/* Last resort that reliably clears a stuck microphone on iOS: save the lesson, reload, continue. */
+function restartMic() {
+  saveProgress();
+  store.set("autoresume", 1);
+  location.reload();
 }
 
 /* Words the recognizer fails to catch when the learner reads a known phrase: a rough signal of unclear pronunciation. */
@@ -398,14 +438,14 @@ function listen() {
   L.draft = ""; L.error = "";
   const ok = startInput({
     auto: db.settings.handsFree,
-    onStart: () => { if (!L) return; L.state = "listening"; L.recStart = Date.now(); lessonUI(); },
+    onStart: () => { if (!L) return; L.state = "listening"; L.recStart = Date.now(); L.micTrouble = false; lessonUI(); },
     onUpdate: t => { if (!L) return; L.draft = t; draftUI(); },
     onDone: (t, ms) => {
       if (!L || L.finished) return;
       if (!t.trim()) { L.state = "idle"; L.error = "Я ничего не расслышал. Нажмите на микрофон и скажите ещё раз, чуть громче."; lessonUI(); return; }
       userSays(t, ms);
     },
-    onFail: msg => { if (!L || L.finished) return; L.state = "idle"; L.error = msg; lessonUI(); }
+    onFail: (msg, isMic) => { if (!L || L.finished) return; L.state = "idle"; L.error = msg; if (isMic) L.micTrouble = true; lessonUI(); }
   });
   L.state = ok ? "starting" : "idle";
   if (!ok) L.error = micBlocked ? "Микрофон недоступен: ответьте текстом ниже." : "Микрофон не включился. Нажмите ещё раз.";
@@ -618,9 +658,13 @@ function statusUI() {
     listening: ["rec", `● Идёт запись · ${rec}`, db.settings.handsFree ? "Говорите. После паузы ответ уйдёт сам." : "Говорите. Закончили — нажмите на красную кнопку, ответ уйдёт Алексу."],
     error: ["err", "Не получилось", L.error || "Нажмите на кнопку, чтобы попробовать ещё раз."]
   }[L.state] || ["wait", "", ""];
-  const st = $("#status"); st.dataset.kind = S[0];
-  $("#statusTitle").textContent = S[1];
-  $("#statusSub").textContent = S[2];
+  const trouble = L.micTrouble && L.state === "idle";
+  const st = $("#status"); st.dataset.kind = trouble ? "err" : S[0];
+  $("#statusTitle").textContent = trouble ? "Микрофон не отвечает" : S[1];
+  $("#statusSub").textContent = trouble
+    ? `${L.error} Если снова не выйдет — нажмите «Перезапустить микрофон»: урок сохранится и продолжится с этого места. Или ответьте голосом через клавиатуру: поле «Или напишите ответ» → 🎤.`
+    : S[2];
+  $("#micFix").hidden = !trouble;
   const label = { thinking: "", speaking: "Перебить и ответить", idle: "Нажмите, чтобы говорить", starting: "Отменить", listening: "Нажмите, чтобы отправить", error: "Повторить" }[L.state] || "";
   $("#micLabel").textContent = label;
   $("#micBtn").setAttribute("aria-label", label || "Микрофон");
@@ -790,6 +834,17 @@ function settingsUI() {
     el("p", { class: "note" }, "На iPhone качественные голоса скачиваются в Настройки → Универсальный доступ → Устный контент → Голоса → English."),
     el("label", { class: "row small" }, el("input", { type: "checkbox", id: "handsFree", checked: st.handsFree, onchange: e => { st.handsFree = e.target.checked; save("settings"); } }),
       "Режим без рук: микрофон включается сам, ответ уходит после паузы (на iPhone может не работать)"),
+    el("details", {},
+      el("summary", {}, "Журнал микрофона (для разбора проблем)"),
+      (() => {
+        const text = [...store.get("miclog", []).map(x => "[прошлый запуск] " + x), ...micLog].join("\n") || "Пока пусто.";
+        const pre = el("pre", { class: "miclog" }, text);
+        const copy = el("button", { class: "btn", onclick: async () => {
+          try { await navigator.clipboard.writeText(text); copy.textContent = "Скопировано"; }
+          catch { getSelection().selectAllChildren(pre); copy.textContent = "Выделено — скопируйте вручную"; }
+        } }, "Скопировать журнал");
+        return el("div", { class: "sec" }, el("p", { class: "note" }, "Если микрофон пропадает, скопируйте журнал и пришлите его в чат: там видны коды ошибок iPhone."), pre, copy);
+      })()),
     el("div", { class: "row" },
       el("button", { class: "btn", onclick: setupUI }, "Ключ Claude"),
       el("button", { class: "btn", onclick: exportData }, "Скачать резервную копию"),
@@ -846,6 +901,7 @@ $("#micTest").addEventListener("click", () => {
 // after a replayed line the learner answers when ready (hands-free mode starts the mic itself)
 const afterReplay = () => { tts.rateMul = 1; if (!L || L.finished || L.state !== "speaking") return; if (db.settings.handsFree && canListen()) listen(); else { L.state = "idle"; lessonUI(); } };
 $("#micBtn").addEventListener("click", micPressed);
+$("#micFix").addEventListener("click", restartMic);
 $("#beginBtn").addEventListener("click", beginLesson);
 $("#repeatBtn").addEventListener("click", () => { if (!L || !L.last.text || L.state === "thinking") return; stopInput(); stopSpeaking(); tts.rateMul = 1; speakQueue(L.last.text); L.state = "speaking"; lessonUI(); whenSpoken(afterReplay); });
 $("#slowBtn").addEventListener("click", () => { if (!L || !L.last.text || L.state === "thinking") return; stopInput(); stopSpeaking(); tts.rateMul = 0.75; speakQueue(L.last.text); L.state = "speaking"; lessonUI(); whenSpoken(afterReplay); });
@@ -863,4 +919,8 @@ if (canSpeak) speechSynthesis.onvoiceschanged = () => { if (!$("#home").hidden) 
 window.addEventListener("beforeunload", e => { if (L && !L.finished) { e.preventDefault(); e.returnValue = ""; } });
 
 makeClient();
-homeUI();
+if (store.get("autoresume", 0)) {
+  try { localStorage.removeItem(K + "autoresume"); } catch {}
+  if (client && savedLesson()) { resumeLesson(false); if (L) { L.error = "Микрофон перезапущен, урок продолжается. Нажмите на микрофон и ответьте."; lessonUI(); } }
+  else homeUI();
+} else homeUI();
